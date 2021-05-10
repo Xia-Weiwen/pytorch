@@ -4,6 +4,7 @@
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <ATen/native/quantized/cpu/packed_params.h>
 #include <ATen/native/quantized/cpu/qnnpack_utils.h>
+#include <ATen/native/quantized/cpu/mkldnn_utils.h>
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <torch/custom_class.h>
 #include <torch/library.h>
@@ -382,6 +383,84 @@ at::Tensor PackedLinearWeightsQnnp::apply_relu(
 }
 
 #endif // USE_PYTORCH_QNNPACK
+
+#ifdef USE_MKLDNN
+template <bool ReluFused>
+at::Tensor PackedLinearWeightsMkldnn::apply_impl(
+    at::Tensor input,
+    double output_scale,
+    int64_t output_zero_point) {
+  const int64_t dim = input.dim();
+  TORCH_CHECK(
+      input.dim() != 0,
+      "mkldnn_linear: input needs to has dim at least 1, input dim ",
+      input.dim());
+  if (input.scalar_type() == c10::ScalarType::BFloat16) {
+    TORCH_CHECK(at::mkldnn_bf16_device_check(),
+        "mkldnn_linear: bf16 path needs the cpu support avx512bw, avx512vl and avx512dq");
+  }
+
+  // reshape first if input dim != 2 and the reshape will cost a memory copy.
+  auto input_reshaped =
+      dim == 2 ? input : input.reshape({-1, input.size(input.dim() - 1)});
+
+  auto input_dims = input_reshaped.sizes().vec();
+  auto input_data_type = input_reshaped.scalar_type() == c10::ScalarType::QInt8 ?
+                          dnnl::memory::data_type::s8 : dnnl::memory::data_type::u8;
+  auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
+  ideep::tensor x;
+  x.init(input_desc, input.data_ptr());
+  x.set_scale(ideep::scale_t(1, 1.0/input.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
+  x.set_zero_point(std::vector<int32_t>(1, input.q_zero_point()));
+  auto w = *(weight_.get());
+  ideep::tensor y;
+  auto dst_dims = {x.get_dim(0), w.get_dim(0)};
+  y.init(dst_dims, ideep::tensor::data_type::u8);
+  const ideep::scale_t& src_scales = x.has_scale() ? x.get_scale() : ideep::scale_t();
+  const ideep::scale_t& weights_scales = w.has_scale() ? w.get_scale() : ideep::scale_t();
+  const ideep::scale_t& dst_scales = ideep::scale_t(1, 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
+  const std::vector<int32_t>& src_zero_point = x.has_zero_point() ? x.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& weights_zero_point = w.has_zero_point() ? w.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& dst_zero_point = std::vector<int32_t>(1, output_zero_point);
+  x.set_zero_point(src_zero_point);
+  w.set_zero_point(weights_zero_point);
+  y.set_zero_point(dst_zero_point);
+  // Compute
+  // Use ideep::matmul_forward instead of ideep::inner_product_forward, since the latter does not support asymmetric quantization
+  if (bias_.has_value()) {
+    const ideep::tensor b = bias_.value();
+    ideep::matmul_forward::compute(x, w, b, y, 1.0f, 1.0f, src_scales, weights_scales, dst_scales);
+  } else {
+    ideep::matmul_forward::compute(x, w, y, 1.0f, 1.0f, src_scales, weights_scales, dst_scales);
+  }
+
+  // Allocate output Tensor
+  at::Tensor output = at::_empty_affine_quantized(
+      y.get_dims(),
+      at::device(c10::kCPU).dtype(c10::kQUInt8),
+      output_scale,
+      output_zero_point);
+  y.to_public(output.template data_ptr<c10::quint8>(),
+              ideep::tensor::data_type::u8);
+  output = output.contiguous();
+  return output;
+}
+
+at::Tensor PackedLinearWeightsMkldnn::apply(
+    at::Tensor input,
+    double output_scale,
+    int64_t output_zero_point) {
+  return apply_impl<false>(std::move(input), output_scale, output_zero_point);
+}
+
+at::Tensor PackedLinearWeightsMkldnn::apply_relu(
+    at::Tensor input,
+    double output_scale,
+    int64_t output_zero_point) {
+  return apply_impl<true>(std::move(input), output_scale, output_zero_point);
+}
+
+#endif // USE_MKLDNN
 
 namespace at {
 namespace native {

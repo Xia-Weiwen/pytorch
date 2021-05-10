@@ -8,6 +8,9 @@
 #include <ATen/native/quantized/cpu/conv_packed_params.h>
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <ATen/native/quantized/cpu/qnnpack_utils.h>
+#include <ATen/native/quantized/cpu/mkldnn_utils.h>
+#include <ATen/NativeFunctions.h>
+#include <ATen/native/ConvUtils.h>
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <torch/library.h>
@@ -778,6 +781,119 @@ template at::Tensor PackedConvWeightsQnnp<3>::apply_relu(
     int64_t output_zero_point);
 
 #endif // USE_PYTORCH_QNNPACK
+
+#ifdef USE_MKLDNN
+template <int kSpatialDim>
+at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply(
+    const at::Tensor& input,
+    double output_scale,
+    int64_t output_zero_point) {
+  return apply_impl<false>(input, output_scale, output_zero_point);
+}
+
+template <int kSpatialDim>
+at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_relu(
+    const at::Tensor& input,
+    double output_scale,
+    int64_t output_zero_point) {
+  return apply_impl<true>(input, output_scale, output_zero_point);
+}
+
+template <int kSpatialDim>
+template <bool kReluFused>
+at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point) {
+  const std::string func_name = transpose() ?
+                                (kReluFused ? "quantized::conv_transpose" : "quantized::conv_transpose_relu")
+                                : (kReluFused ? "quantized::conv" : "quantized::conv_relu");
+  ConvDimChecks<kSpatialDim>(
+      act.ndimension(), stride().size(), padding().size(),
+      output_padding().size(), dilation().size(), func_name, transpose());
+
+  // src
+  auto src_dims = act.sizes().vec();
+  auto src_data_type = act.scalar_type() == c10::ScalarType::QInt8 ?
+                          dnnl::memory::data_type::s8 : dnnl::memory::data_type::u8;
+  auto src_desc = ideep::tensor::desc(src_dims, src_data_type);
+  ideep::tensor src;
+  src.init(src_desc, act.data_ptr());
+  src.set_scale(ideep::scale_t(1, 1.0/act.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
+  src.set_zero_point(std::vector<int32_t>(1, act.q_zero_point()));
+  // weights & bias
+  ideep::tensor weights = *(weight_.get());
+  bool with_bias = bias_.has_value();
+  auto kernel_size = weights.get_dims();
+  // dst
+  std::vector<int64_t> input_size = src.get_dims();
+  std::vector<int64_t> output_sizes =
+      at::native::conv_output_size(input_size, kernel_size, padding_.vec(), stride_.vec(), dilation_.vec());
+  ideep::dims dst_dims = ideep::dims({output_sizes.cbegin(), output_sizes.cend()});
+  ideep::tensor dst;
+  dst.init(dst_dims, ideep::tensor::data_type::u8);
+  // Parameters
+  ideep::dims strides = stride_.vec();
+  ideep::dims dilates = dilation_.vec();
+  ideep::dims padding_l = padding_.vec();
+  ideep::dims padding_r = padding_.vec();
+  const ideep::scale_t& src_scales = src.has_scale() ? src.get_scale() : ideep::scale_t();
+  const ideep::scale_t& weights_scales = weights.has_scale() ? weights.get_scale() : ideep::scale_t();
+  const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
+  const std::vector<int32_t>& src_zero_point = src.has_zero_point() ? src.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& weights_zero_point = weights.has_zero_point() ? weights.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& dst_zero_point = std::vector<int32_t>(1, output_zero_point);
+  src.set_zero_point(src_zero_point);
+  weights.set_zero_point(weights_zero_point);
+  dst.set_zero_point(dst_zero_point);
+  if (with_bias) {
+    auto b = bias_.value();
+    ideep::convolution_forward::compute(src, weights, b, dst_dims, dst,
+                                        strides, dilates, padding_l, padding_r, groups_,
+                                        src_scales, weights_scales, dst_scales);
+  } else {
+    ideep::convolution_forward::compute(src, weights, dst_dims, dst,
+                                        strides, dilates, padding_l, padding_r, groups_,
+                                        src_scales, weights_scales, dst_scales);
+  }
+
+  // Allocate output Tensor
+  at::Tensor output = at::native::empty_affine_quantized(
+      dst_dims,
+      c10::kQUInt8,
+      c10::nullopt /* layout */,
+      c10::kCPU,
+      c10::nullopt /* pin_memory */,
+      output_scale,
+      output_zero_point,
+      c10::MemoryFormat::ChannelsLast);
+  auto pub_tensor = dst.to_public(output.template data_ptr<c10::quint8>(),
+                                              ideep::tensor::data_type::u8);
+  output = output.contiguous();
+  return output;
+}
+
+template at::Tensor PackedConvWeightsMkldnn<2>::apply(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeightsMkldnn<2>::apply_relu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeightsMkldnn<3>::apply(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeightsMkldnn<3>::apply_relu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+#endif // USE_MKLDNN
 
 namespace at {
 namespace native {

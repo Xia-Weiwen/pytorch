@@ -4,6 +4,7 @@
 #include <ATen/native/quantized/cpu/init_qnnpack.h>
 #include <ATen/native/quantized/cpu/packed_params.h>
 #include <ATen/native/quantized/cpu/qnnpack_utils.h>
+#include <ATen/native/quantized/cpu/mkldnn_utils.h>
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <ATen/quantized/Quantizer.h>
 #include <torch/custom_class.h>
@@ -196,6 +197,46 @@ c10::intrusive_ptr<LinearPackedParamsBase> PackedLinearWeightFp16::prepack(
 }
 #endif // USE_FBGEMM
 
+#ifdef USE_MKLDNN
+c10::intrusive_ptr<LinearPackedParamsBase> PackedLinearWeightsMkldnn::prepack(
+    at::Tensor weight,
+    c10::optional<at::Tensor> bias) {
+  TORCH_CHECK(
+      weight.dim() == 2,
+      "The weight tensor for quantized::linear_prepack (mkldnn) should"
+      " be 2-dimensional.");
+  TORCH_CHECK(
+      weight.q_zero_point() == 0,
+      "The zero point of weight tensor for quantized::linear_prepack (mkldnn)"
+      " should be 0.");
+  // Weight
+  std::vector<int64_t> dims = {weight.sizes()[1], weight.sizes()[0]}; // need transpose for mkldnn matmul
+  auto w_desc = ideep::tensor::desc(dims, dnnl::memory::data_type::s8);
+  ideep::tensor packed_weight;
+  packed_weight.init(w_desc, weight.data_ptr());
+  packed_weight.set_scale(ideep::scale_t(1, 1.0/weight.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
+  packed_weight.set_zero_point(std::vector<int32_t>(1, weight.q_zero_point()));
+  std::unique_ptr<ideep::tensor> weight_ptr(new ideep::tensor(packed_weight));
+  // Bias
+  c10::optional<ideep::tensor> mkldnn_bias{c10::nullopt};
+  if (bias.has_value()) {
+    auto bias_size = bias.value().sizes().vec();
+    bias_size.insert(bias_size.begin(), 1);
+    auto bias_desc = ideep::tensor::desc(bias_size, dnnl::memory::data_type::f32);
+    ideep::tensor packed_bias;
+    packed_bias.init(bias_desc, bias.value().data_ptr());
+    mkldnn_bias = c10::optional<ideep::tensor>(packed_bias);
+  }
+  auto ret_ptr = c10::make_intrusive<PackedLinearWeightsMkldnn>(
+      PackedLinearWeightsMkldnn{
+        std::move(weight_ptr),
+        mkldnn_bias,
+        weight,
+        bias});
+  return ret_ptr;
+}
+#endif // USE_MKLDNN
+
 namespace at {
 namespace native {
 
@@ -225,6 +266,11 @@ class QLinearPackWeightInt8 final {
           std::move(weight), std::move(bias));
     }
 #endif
+#ifdef USE_MKLDNN
+    if (ctx.qEngine() == at::QEngine::MKLDNN) {
+      return PackedLinearWeightsMkldnn::prepack(std::move(weight), std::move(bias));
+    }
+#endif // USE_MKLDNN
     TORCH_CHECK(
         false,
         "Didn't find engine for operation quantized::linear_prepack ",
@@ -252,6 +298,14 @@ class QLinearPackWeightFp16 final {
           "not supported by QNNPACK");
     }
 #endif // USE_PYTORCH_QNNPACK
+#ifdef USE_MKLDNN
+    if (ctx.qEngine() == at::QEngine::MKLDNN) {
+      TORCH_CHECK(
+          false,
+          "quantized::linear_prepack_fp16 is currently "
+          "not supported by MKLDNN");
+    }
+#endif // USE_MKLDNN
     TORCH_CHECK(
         false,
         "Didn't find engine for operation quantized::linear_prepack_fp16 ",
@@ -285,6 +339,16 @@ class QLinearPackWeightInt8Legacy final {
       return cpp_custom_type_hack::create(std::move(wrapped), options);
     }
 #endif // USE_PYTORCH_QNNPACK
+#ifdef USE_MKLDNN
+    if (ctx.qEngine() == at::QEngine::MKLDNN) {
+      auto prepacked =
+          PackedLinearWeightsMkldnn::prepack(std::move(weight), std::move(bias));
+      auto wrapped =
+          std::make_unique<c10::intrusive_ptr<LinearPackedParamsBase>>(
+              std::move(prepacked));
+      return cpp_custom_type_hack::create(std::move(wrapped), options);
+    }
+#endif // USE_MKLDNN
     TORCH_CHECK(
         false,
         "Didn't find engine for operation quantized::linear_prepack ",
@@ -315,6 +379,14 @@ class QLinearPackWeightFp16Legacy final {
           "not supported by QNNPACK");
     }
 #endif // USE_PYTORCH_QNNPACK
+#ifdef USE_MKLDNN
+    if (ctx.qEngine() == at::QEngine::MKLDNN) {
+      TORCH_CHECK(
+          false,
+          "quantized::linear_prepack_fp16 is currently "
+          "not supported by MKLDNN");
+    }
+#endif // USE_MKLDNN
     TORCH_CHECK(
         false,
         "Didn't find engine for operation quantized::linear_prepack_fp16 ",

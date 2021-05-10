@@ -4,6 +4,7 @@
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <ATen/native/quantized/cpu/packed_params.h>
 #include <ATen/native/quantized/cpu/qnnpack_utils.h>
+#include <ATen/native/quantized/cpu/mkldnn_utils.h>
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <torch/library.h>
@@ -414,6 +415,125 @@ void PackedLinearWeightFp16::set_bias(c10::optional<at::Tensor> bias) {
 
 #endif // USE_FBGEMM
 
+#ifdef USE_MKLDNN
+template <bool ReluFused>
+at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool reduce_range) {
+  using at::Tensor;
+  // fp32 * int8 -> fp32 (with quantization on activation, and dequantization on the result).
+
+  TORCH_CHECK(
+      input.dim() >= 2,
+      "The dimension of input tensor should be larger than or equal to 2");
+
+  // Input -> uint8
+  const int64_t dim = input.dim();
+  auto input_reshaped =
+      dim == 2 ? input : input.reshape({-1, input.size(input.dim() - 1)});
+  auto input_dims = input_reshaped.sizes().vec();
+  auto input_data_type = dnnl::memory::data_type::f32;
+  auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
+  ideep::tensor x;
+  x.init(input_desc, input.data_ptr());
+  double x_scale;
+  int64_t x_zero_point;
+  find_scale_zero_point(input_reshaped, reduce_range, x_scale, x_zero_point);
+  x.set_scale(ideep::scale_t(1, x_scale));
+  x.set_zero_point(std::vector<int32_t>(1, x_zero_point));
+  // weights, dst
+  auto w = *(weight_.get());
+  ideep::tensor y;
+  auto dst_dims = {x.get_dim(0), w.get_dim(0)};
+  y.init(dst_dims, ideep::tensor::data_type::f32);
+  const ideep::scale_t& src_scales = x.has_scale() ? x.get_scale() : ideep::scale_t();
+  const ideep::scale_t& weights_scales = w.has_scale() ? w.get_scale() : ideep::scale_t();
+  const std::vector<int32_t>& src_zero_point = x.has_zero_point() ? x.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& weights_zero_point = w.has_zero_point() ? w.get_zero_point() : std::vector<int32_t>();
+  x.set_zero_point(src_zero_point);
+  w.set_zero_point(weights_zero_point);
+  // Compute
+  // Use ideep::matmul_forward instead of ideep::inner_product_forward, since the latter does not support asymmetric quantization
+  if (bias_.has_value()) {
+    const ideep::tensor b = bias_.value();
+    ideep::matmul_forward::compute(x, w, b, y, 1.0f, 1.0f, src_scales, weights_scales);
+  } else {
+    ideep::matmul_forward::compute(x, w, y, 1.0f, 1.0f, src_scales, weights_scales);
+  }
+
+  // Output -> fp32
+  auto input_size = input.sizes();
+  std::vector<int64_t> output_size(input_size.begin(), input_size.end() - 1);
+  output_size.push_back(w.get_dim(0));
+
+  // Allocate output Tensor
+  at::Tensor output = at::empty(
+      y.get_dims(),
+      at::device(c10::kCPU).dtype(c10::kFloat));
+  auto pub_tensor = y.to_public(output.template data_ptr<float>(),
+                                ideep::tensor::data_type::f32);
+  output = output.contiguous();
+  return output;
+}
+
+at::Tensor PackedLinearWeightsMkldnn::apply_dynamic(at::Tensor input, bool reduce_range) {
+  return apply_dynamic_impl</*ReluFused=*/false>(std::move(input), reduce_range);
+}
+
+at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_relu(at::Tensor input, bool reduce_range) {
+  return apply_dynamic_impl</*ReluFused=*/true>(std::move(input), reduce_range);
+}
+
+void PackedLinearWeightsMkldnn::find_scale_zero_point(at::Tensor input, bool reduce_range,
+                                                      double &scale, int64_t &zero_point) {
+  int qmax = 255; // for uint8
+  int qmin = 0;
+  if (reduce_range) {
+    qmin = qmin/2;
+    qmax = qmax/2;
+  }
+  int src_len = 1;
+  for (auto size : input.sizes().vec()) {
+    src_len *= size;
+  }
+  float src_min = FLT_MAX, src_max = FLT_MIN;
+  for (int i = 0; i < src_len; ++i) {
+    auto r = input.data_ptr<float>()[i];
+    if (src_min > r) src_min = r;
+    if (src_max < r) src_max = r;
+  }
+  src_min = std::min(src_min, 0.f);
+  src_max = std::max(src_max, 0.f);
+  scale = (static_cast<double>(src_max) - src_min) / (qmax - qmin);
+  if (float(scale) == 0.0f || std::isinf(1.0f / float(scale))) {
+    scale = 0.1;
+  }
+  TORCH_CHECK(scale > 0, "quantization scale should be > 0");
+
+  double zero_point_from_min = qmin - src_min / static_cast<double>(scale);
+  double zero_point_from_max = qmax - src_max / static_cast<double>(scale);
+  double zero_point_from_min_error =
+      std::abs(qmin) - std::abs(src_min / static_cast<double>(scale));
+  double zero_point_from_max_error =
+      std::abs(qmax) - std::abs(src_max / static_cast<double>(scale));
+  double initial_zero_point =
+      zero_point_from_min_error < zero_point_from_max_error
+      ? zero_point_from_min
+      : zero_point_from_max;
+
+  int32_t nudged_zero_point = 0;
+  if (initial_zero_point < qmin) {
+    nudged_zero_point = qmin;
+  } else if (initial_zero_point > qmax) {
+    nudged_zero_point = qmax;
+  } else {
+    nudged_zero_point = nearbyint(initial_zero_point);
+  }
+
+  scale = 1.0f / scale;
+  zero_point = nudged_zero_point;
+}
+
+#endif // USE_MKLDNN
+
 namespace at {
 namespace native {
 namespace {
@@ -472,6 +592,16 @@ TORCH_LIBRARY_IMPL(quantized, CPU, m) {
 }
 
 TORCH_LIBRARY_IMPL(_quantized, CPU, m) {
+  m.impl(TORCH_SELECTIVE_NAME("_quantized::linear_dynamic"), TORCH_FN(QLinearDynamicInt8<false>::run));
+}
+
+TORCH_LIBRARY_IMPL(quantized, QuantizedCPU, m) {
+  m.impl(TORCH_SELECTIVE_NAME("quantized::linear_dynamic"), TORCH_FN(QLinearDynamicInt8<false>::run));
+  m.impl(TORCH_SELECTIVE_NAME("quantized::linear_relu_dynamic"), TORCH_FN(QLinearDynamicInt8<true>::run));
+  m.impl(TORCH_SELECTIVE_NAME("quantized::linear_dynamic_fp16"), TORCH_FN(QLinearDynamicFp16<false>::run));
+}
+
+TORCH_LIBRARY_IMPL(_quantized, QuantizedCPU, m) {
   m.impl(TORCH_SELECTIVE_NAME("_quantized::linear_dynamic"), TORCH_FN(QLinearDynamicInt8<false>::run));
 }
 

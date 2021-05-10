@@ -3,6 +3,7 @@
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <ATen/native/quantized/cpu/packed_params.h>
 #include <ATen/native/quantized/cpu/qnnpack_utils.h>
+#include <ATen/native/quantized/cpu/mkldnn_utils.h>
 #include <torch/custom_class.h>
 #include <torch/library.h>
 
@@ -74,6 +75,12 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> PackedLinearWeightFp16::
 }
 #endif // USE_FBGEMM
 
+#ifdef USE_MKLDNN
+std::tuple<at::Tensor, c10::optional<at::Tensor>> PackedLinearWeightsMkldnn::unpack() {
+  return std::tuple<at::Tensor, c10::optional<at::Tensor>>(
+      orig_weight_, orig_bias_);
+}
+#endif
 namespace at {
 namespace native {
 namespace {

@@ -20,6 +20,10 @@
 #include <fbgemm/Fbgemm.h>
 #endif // USE_FBGEMM
 
+#ifdef USE_MKLDNN
+#include <ATen/native/mkldnn/Utils.h>
+#endif
+
 namespace at {
 
 Context::Context()
@@ -208,6 +212,10 @@ const std::vector<at::QEngine>& Context::supportedQEngines() {
     if (fbgemm::fbgemmSupportedCPU()) {
       engines.push_back(at::kFBGEMM);
     }
+#endif
+
+#ifdef USE_MKLDNN
+    engines.push_back(at::kMKLDNN);
 #endif
     return engines;
   }();
