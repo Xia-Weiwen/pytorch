@@ -837,11 +837,11 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
   ideep::dims dilates = dilation_.vec();
   ideep::dims padding_l = padding_.vec();
   ideep::dims padding_r = padding_.vec();
-  const ideep::scale_t& src_scales = src.has_scale() ? src.get_scale() : ideep::scale_t();
-  const ideep::scale_t& weights_scales = weights.has_scale() ? weights.get_scale() : ideep::scale_t();
+  const ideep::scale_t& src_scales = src.get_scale();
+  const ideep::scale_t& weights_scales = weights.get_scale();
   const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
-  const std::vector<int32_t>& src_zero_point = src.has_zero_point() ? src.get_zero_point() : std::vector<int32_t>();
-  const std::vector<int32_t>& weights_zero_point = weights.has_zero_point() ? weights.get_zero_point() : std::vector<int32_t>();
+  const std::vector<int32_t>& src_zero_point = src.get_zero_point();
+  const std::vector<int32_t>& weights_zero_point = weights.get_zero_point();
   const std::vector<int32_t>& dst_zero_point = std::vector<int32_t>(1, output_zero_point);
   src.set_zero_point(src_zero_point);
   weights.set_zero_point(weights_zero_point);
@@ -869,7 +869,6 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
       c10::MemoryFormat::ChannelsLast);
   auto pub_tensor = dst.to_public(output.template data_ptr<c10::quint8>(),
                                               ideep::tensor::data_type::u8);
-  output = output.contiguous();
   return output;
 }
 

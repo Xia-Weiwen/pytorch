@@ -450,7 +450,7 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
   const std::vector<int32_t>& weights_zero_point = w.has_zero_point() ? w.get_zero_point() : std::vector<int32_t>();
   x.set_zero_point(src_zero_point);
   w.set_zero_point(weights_zero_point);
-  // Compute
+  // Compute -> f32
   // Use ideep::matmul_forward instead of ideep::inner_product_forward, since the latter does not support asymmetric quantization
   if (bias_.has_value()) {
     const ideep::tensor b = bias_.value();
@@ -459,18 +459,12 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
     ideep::matmul_forward::compute(x, w, y, 1.0f, 1.0f, src_scales, weights_scales);
   }
 
-  // Output -> fp32
-  auto input_size = input.sizes();
-  std::vector<int64_t> output_size(input_size.begin(), input_size.end() - 1);
-  output_size.push_back(w.get_dim(0));
-
   // Allocate output Tensor
   at::Tensor output = at::empty(
       y.get_dims(),
       at::device(c10::kCPU).dtype(c10::kFloat));
   auto pub_tensor = y.to_public(output.template data_ptr<float>(),
                                 ideep::tensor::data_type::f32);
-  output = output.contiguous();
   return output;
 }
 

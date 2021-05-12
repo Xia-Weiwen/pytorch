@@ -442,7 +442,6 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
       output_zero_point);
   y.to_public(output.template data_ptr<c10::quint8>(),
               ideep::tensor::data_type::u8);
-  output = output.contiguous();
   return output;
 }
 
