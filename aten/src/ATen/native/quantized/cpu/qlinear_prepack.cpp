@@ -239,7 +239,8 @@ c10::intrusive_ptr<LinearPackedParamsBase> PackedLinearWeightsMkldnn::prepack(
   // Prepack weight
   auto w_desc = ideep::matmul_forward::expected_weights_desc(dims, dnnl::memory::data_type::s8,
                                                              dnnl::memory::data_type::u8);
-  ideep::tensor wgt = ideep::tensor({dims, dnnl::memory::data_type::s8}, weight.data_ptr());
+  auto weight_copy = weight.clone();
+  ideep::tensor wgt = ideep::tensor({dims, dnnl::memory::data_type::s8}, weight_copy.data_ptr());
   ideep::tensor exp_wgt;
   exp_wgt.init(w_desc);
   exp_wgt.feed_from(wgt);

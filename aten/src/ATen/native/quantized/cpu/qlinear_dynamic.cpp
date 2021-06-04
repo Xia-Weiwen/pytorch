@@ -432,6 +432,7 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
   auto input_dims = input_reshaped.sizes().vec();
   auto input_data_type = dnnl::memory::data_type::f32;
   auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
+  ideep::attr_t op_attr = ReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   ideep::tensor x;
   x.init(input_desc, input.data_ptr());
   float x_max, x_min;
@@ -461,9 +462,9 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
                   output.data_ptr());
   if (bias_.has_value()) {
     const ideep::tensor b = bias_.value();
-    ideep::matmul_forward::compute(x, w, b, y, 1.0f, 1.0f, src_scales, weights_scales);
+    ideep::matmul_forward::compute(x, w, b, y, 1.0f, 1.0f, src_scales, weights_scales, ideep::scale_t(), op_attr);
   } else {
-    ideep::matmul_forward::compute(x, w, y, 1.0f, 1.0f, src_scales, weights_scales);
+    ideep::matmul_forward::compute(x, w, y, 1.0f, 1.0f, src_scales, weights_scales, ideep::scale_t(), op_attr);
   }
   auto out_sizes = input.sizes().vec();
   out_sizes.back() = w.get_dim(1);

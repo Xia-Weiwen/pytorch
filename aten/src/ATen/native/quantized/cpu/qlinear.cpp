@@ -443,7 +443,7 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
   auto input_data_type = input_reshaped.scalar_type() == c10::ScalarType::QInt8 ?
                           dnnl::memory::data_type::s8 : dnnl::memory::data_type::u8;
   auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
-  ideep::attr_t op_attr = ReluFused ? ideep::attr_t() : ideep::attr_t::fuse_relu();
+  ideep::attr_t op_attr = ReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   ideep::tensor x;
   x.init(input_desc, input.data_ptr());
   x.set_scale(ideep::scale_t(1, 1.0/input.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal

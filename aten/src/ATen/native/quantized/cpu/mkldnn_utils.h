@@ -9,7 +9,6 @@
 #include <c10/core/QScheme.h>
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
-#include <cfloat>
 
 struct PackedLinearWeightsMkldnn : public LinearPackedParamsBase {
   PackedLinearWeightsMkldnn(
