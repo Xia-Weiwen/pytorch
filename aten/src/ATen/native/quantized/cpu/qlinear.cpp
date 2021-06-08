@@ -430,18 +430,12 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
       input.dim() != 0,
       "mkldnn_linear: input needs to has dim at least 1, input dim ",
       input.dim());
-  if (input.scalar_type() == c10::ScalarType::BFloat16) {
-    TORCH_CHECK(at::mkldnn_bf16_device_check(),
-        "mkldnn_linear: bf16 path needs the cpu support avx512bw, avx512vl and avx512dq");
-  }
 
-  // reshape first if input dim != 2 and the reshape will cost a memory copy.
   auto input_reshaped =
       dim == 2 ? input : input.reshape({-1, input.size(input.dim() - 1)});
 
   auto input_dims = input_reshaped.sizes().vec();
-  auto input_data_type = input_reshaped.scalar_type() == c10::ScalarType::QInt8 ?
-                          dnnl::memory::data_type::s8 : dnnl::memory::data_type::u8;
+  auto input_data_type = dnnl::memory::data_type::u8;
   auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
   ideep::attr_t op_attr = ReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   ideep::tensor x;
