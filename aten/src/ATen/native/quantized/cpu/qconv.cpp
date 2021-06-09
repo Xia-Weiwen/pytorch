@@ -815,6 +815,8 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
       kSpatialDim == 2,
       func_name, kSpatialDim,
       "d (mkldnn): MKLDNN only supports Conv2d now.");
+  TORCH_CHECK(act.scalar_type() == c10::ScalarType::QUInt8,
+      func_name, " (MKLDNN): data type of input should be QUint8.");
 
   // src
   auto src_dims = act.sizes().vec();
