@@ -424,6 +424,8 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
   TORCH_CHECK(
       input.dim() >= 2,
       "The dimension of input tensor should be larger than or equal to 2");
+  TORCH_CHECK(input.scalar_type() == c10::ScalarType::Float,
+      "qlinear_dynamic (MKLDNN): data type of input should be float.");
 
   // Input -> uint8
   const int64_t dim = input.dim();

@@ -430,6 +430,8 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
       input.dim() != 0,
       "mkldnn_linear: input needs to has dim at least 1, input dim ",
       input.dim());
+  TORCH_CHECK(input.scalar_type() == c10::ScalarType::QUInt8,
+      "qlinear (MKLDNN): data type of input should be QUint8.");
 
   auto input_reshaped =
       dim == 2 ? input : input.reshape({-1, input.size(input.dim() - 1)});
