@@ -387,8 +387,14 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
   } else {
     TORCH_CHECK(false, "Unsupported qscheme: ", toString(qtype));
   }
+  bool is_one_dim_zero_point = true;
+  for (int i = 1; i < wgt_zero_points.size(); ++i) {
+    if (wgt_zero_points[i] != wgt_zero_points[0]) {
+      is_one_dim_zero_point = false;
+    }
+  }
   TORCH_CHECK(
-      wgt_zero_points.size()<=1,
+      is_one_dim_zero_point,
       "quantized::conv_prepack: MKLDNN only supports 1-dim zero point right now");
 
   // Set runtime src zero point
@@ -416,12 +422,16 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
     std::iota(perms.begin(), perms.end(), 0);
     if (groups > 1) {
       w_tag = kSpatialDim == 2 ? dnnl::memory::format_tag::goihw : dnnl::memory::format_tag::goidhw;
-      std::swap(perms[1], perms[2]);
+      w_desc = w_desc.transpose(1, 2);
+      // std::swap(perms[1], perms[2]);
     } else {
       w_tag = kSpatialDim == 2 ? dnnl::memory::format_tag::oihw : dnnl::memory::format_tag::oidhw;
+      w_desc = w_desc.transpose(0, 1);
       std::swap(perms[0], perms[1]);
+      if (dims[kSpatialDim + 0] == 1 && dims[kSpatialDim + 1] == 1) { // kernel size is 1x1
+        w_desc = w_desc.to_format(w_tag); // Without this, reorder may fail if both KH & KW are 1
+      }
     }
-    w_desc = w_desc.to_format(w_tag); // Without this, reorder may fail if both KH & KW are 1
     weight_copy = weight.reshape(dims_giohw).permute(c10::IntArrayRef(perms)).clone();
   } else {
     w_desc = ideep::convolution_forward::expected_weights_desc(
@@ -433,8 +443,10 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
     dims_oihw = w_desc.get_dims();
   }
   ideep::tensor wgt = ideep::tensor({dims_oihw, dnnl::memory::data_type::s8}, weight_copy.data_ptr());
+  wgt.set_scale(wgt_scales); // Scales are needed for feed_from().
   ideep::tensor exp_wgt;
   exp_wgt.init(w_desc);
+  exp_wgt.set_scale(wgt_scales); // Also for feed_from()
   exp_wgt.feed_from(wgt, transpose); // expect wgt to be in [OC IC KH KW] format
   ideep::tensor * packed_weight_p = new ideep::tensor(exp_wgt);
   packed_weight_p->set_scale(wgt_scales);

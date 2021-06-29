@@ -464,6 +464,11 @@ at::Tensor PackedLinearWeightsMkldnn::apply_dynamic_impl(at::Tensor input, bool 
   ideep::tensor y({dst_dims, ideep::tensor::data_type::f32, {output.strides().cbegin(), output.strides().cend()}},
                   output.data_ptr());
   if (bias_.has_value()) {
+    // Bias might be modified outside (e.g. by quantization bias correction).
+    // If so, update the prepacked bias as well.
+    if (bias_.value().get_data_handle() != orig_bias_.value().data_ptr()) {
+      bias_.value().init(bias_.value().get_desc(), orig_bias_.value().data_ptr());
+    }
     const ideep::tensor b = bias_.value();
     ideep::matmul_forward::compute(x, w, b, y, 1.0f, 1.0f, src_scales, weights_scales, ideep::scale_t(), op_attr);
   } else {

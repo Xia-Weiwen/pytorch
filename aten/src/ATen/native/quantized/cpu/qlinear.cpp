@@ -442,7 +442,7 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
   auto input_desc = ideep::tensor::desc(input_dims, input_data_type);
   ideep::attr_t op_attr = ReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   ideep::tensor x;
-  x.init(input_desc, input.data_ptr());
+  x.init(input_desc, input_contig.data_ptr());
   x.set_scale(ideep::scale_t(1, 1.0/input.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
   x.set_zero_point(std::vector<int32_t>(1, input.q_zero_point()));
   auto w = *(weight_.get());
@@ -465,6 +465,11 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
                   output.data_ptr());
   y.set_zero_point(dst_zero_point);
   if (bias_.has_value()) {
+    // Bias might be modified outside (e.g. by quantization bias correction).
+    // If so, update the prepacked bias as well.
+    if (bias_.value().get_data_handle() != orig_bias_.value().data_ptr()) {
+      bias_.value().init(bias_.value().get_desc(), orig_bias_.value().data_ptr());
+    }
     const ideep::tensor b = bias_.value();
     TORCH_CHECK(b.get_dim(0) == 1, "bias should be a vector (1D Tensor), but got [", b.get_dims(), "]");
     TORCH_CHECK(

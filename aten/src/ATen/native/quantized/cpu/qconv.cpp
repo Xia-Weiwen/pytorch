@@ -888,6 +888,11 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
   ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   op_attr.set_zero_points(DNNL_ARG_SRC, ideep::utils::tensor_zp_mask(1), {DNNL_RUNTIME_S32_VAL}); // runtime src zero point
   if (with_bias) {
+    // Bias might be modified outside (e.g. by quantization bias correction).
+    // If so, update the prepacked bias as well.
+    if (bias_.value().get_data_handle() != orig_bias_.value().data_ptr()) {
+      bias_.value().init(bias_.value().get_desc(), orig_bias_.value().data_ptr());
+    }
     auto b = bias_.value();
     if (transpose()) {
       ideep::convolution_transpose_forward::compute(
