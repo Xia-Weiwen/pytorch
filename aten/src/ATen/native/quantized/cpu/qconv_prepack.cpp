@@ -423,7 +423,7 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
     if (groups > 1) {
       w_tag = kSpatialDim == 2 ? dnnl::memory::format_tag::goihw : dnnl::memory::format_tag::goidhw;
       w_desc = w_desc.transpose(1, 2);
-      // std::swap(perms[1], perms[2]);
+      // std::swap(perms[1], perms[2]); // this may cause failures in some cases for grouped weight
     } else {
       w_tag = kSpatialDim == 2 ? dnnl::memory::format_tag::oihw : dnnl::memory::format_tag::oidhw;
       w_desc = w_desc.transpose(0, 1);
@@ -448,6 +448,7 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
   exp_wgt.init(w_desc);
   exp_wgt.set_scale(wgt_scales); // Also for feed_from()
   exp_wgt.feed_from(wgt, transpose); // expect wgt to be in [OC IC KH KW] format
+  // std::cout << "conv weight prepack reorder" << std::endl;
   ideep::tensor * packed_weight_p = new ideep::tensor(exp_wgt);
   packed_weight_p->set_scale(wgt_scales);
   packed_weight_p->set_zero_point(wgt_zero_points);

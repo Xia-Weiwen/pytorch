@@ -820,20 +820,21 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
       func_name, " (MKLDNN): data type of input should be QUint8.");
 
   // src
-  auto act_contig = act.contiguous();
+  auto act_contig = act.contiguous(kSpatialDim == 2 ? c10::MemoryFormat::ChannelsLast : c10::MemoryFormat::ChannelsLast3d);
   auto src_dims = act_contig.sizes().vec();
   auto src_data_type = dnnl::memory::data_type::u8;
-  auto src_desc = ideep::tensor::desc(src_dims, src_data_type);
+  auto src_desc = ideep::tensor::desc(src_dims, src_data_type,
+      kSpatialDim == 2 ? ideep::format_tag::nhwc : ideep::format_tag::ndhwc);
   ideep::tensor src;
   src.init(src_desc, act_contig.data_ptr());
   src.set_scale(ideep::scale_t(1, 1.0/act.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
   src.set_zero_point(std::vector<int32_t>(1, act.q_zero_point()));
   // weights & bias
-  ideep::tensor weights = *(weight_.get());
+  ideep::tensor& weights = *(weight_.get());
   bool with_bias = bias_.has_value();
-  auto kernel_size = weights.get_dims();
+  const auto& kernel_size = weights.get_dims();
   // dst
-  std::vector<int64_t> input_size = src.get_dims();
+  const std::vector<int64_t>& input_size = src.get_dims();
   std::vector<int64_t> output_sizes;
   if (transpose()) {
     // Prepacked weight format: [o, i, ...]
@@ -863,25 +864,35 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
     output_sizes = at::native::conv_output_size(input_size, kernel_size, padding().vec(), stride().vec(), dilation().vec());
   }
   ideep::dims dst_dims = ideep::dims({output_sizes.cbegin(), output_sizes.cend()});
-  at::Tensor output = at::native::empty_affine_quantized( // Allocate output Tensor
-      dst_dims,
-      c10::kQUInt8,
-      c10::nullopt /* layout */,
-      c10::kCPU,
-      c10::nullopt /* pin_memory */,
-      output_scale,
-      output_zero_point,
-      kSpatialDim == 2
-          ? c10::MemoryFormat::ChannelsLast
-          : c10::MemoryFormat::ChannelsLast3d);
+//  at::Tensor output = at::native::empty_affine_quantized( // Allocate output Tensor
+//      dst_dims,
+//      c10::kQUInt8,
+//      c10::nullopt /* layout */,
+//      c10::kCPU,
+//      c10::nullopt /* pin_memory */,
+//      output_scale,
+//      output_zero_point,
+//      kSpatialDim == 2
+//          ? c10::MemoryFormat::ChannelsLast
+//          : c10::MemoryFormat::ChannelsLast3d);
+  at::Tensor output = at::_empty_affine_quantized(
+            dst_dims,
+            device(c10::kCPU)
+                .dtype(c10::kQUInt8)
+                .memory_format(kSpatialDim == 2 ?
+                    c10::MemoryFormat::ChannelsLast :
+                    c10::MemoryFormat::ChannelsLast3d),
+            output_scale,
+            output_zero_point,
+            c10::nullopt);
   ideep::tensor dst({dst_dims, ideep::tensor::data_type::u8, {output.strides().cbegin(), output.strides().cend()}},
                     output.data_ptr());
   dst.set_zero_point(std::vector<int32_t>(1, output_zero_point));
   // Parameters
-  ideep::dims strides = stride().vec();
-  ideep::dims dilates = dilation().vec();
-  ideep::dims padding_l = padding().vec();
-  ideep::dims padding_r = padding().vec();
+  const ideep::dims& strides = stride().vec();
+  const ideep::dims& dilates = dilation().vec();
+  const ideep::dims& padding_l = padding().vec();
+  const ideep::dims& padding_r = padding().vec();
   const ideep::scale_t& src_scales = src.get_scale();
   const ideep::scale_t& weights_scales = weights.get_scale();
   const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
@@ -893,7 +904,7 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
     if (bias_.value().get_data_handle() != orig_bias_.value().data_ptr()) {
       bias_.value().init(bias_.value().get_desc(), orig_bias_.value().data_ptr());
     }
-    auto b = bias_.value();
+    auto& b = bias_.value();
     if (transpose()) {
       ideep::convolution_transpose_forward::compute(
           src, weights, b, dst_dims, dst,
