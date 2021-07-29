@@ -827,8 +827,6 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
       kSpatialDim == 2 ? ideep::format_tag::nhwc : ideep::format_tag::ndhwc);
   ideep::tensor src;
   src.init(src_desc, act_contig.data_ptr());
-  src.set_scale(ideep::scale_t(1, 1.0/act.q_scale())); // Scales of MKLDNN and PyTorch are reciprocal
-  src.set_zero_point(std::vector<int32_t>(1, act.q_zero_point()));
   // weights & bias
   ideep::tensor& weights = *(weight_.get());
   bool with_bias = bias_.has_value();
@@ -838,6 +836,7 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
   std::vector<int64_t> output_sizes;
   if (transpose()) {
     // Prepacked weight format: [o, i, ...]
+    const bool with_groups = groups() > 1;
     const int N = act.size(0); // batch size
     const int C = act.size(1); // input channels
     const int M = weights.get_dim(0); // output channels
@@ -864,38 +863,28 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
     output_sizes = at::native::conv_output_size(input_size, kernel_size, padding().vec(), stride().vec(), dilation().vec());
   }
   ideep::dims dst_dims = ideep::dims({output_sizes.cbegin(), output_sizes.cend()});
-//  at::Tensor output = at::native::empty_affine_quantized( // Allocate output Tensor
-//      dst_dims,
-//      c10::kQUInt8,
-//      c10::nullopt /* layout */,
-//      c10::kCPU,
-//      c10::nullopt /* pin_memory */,
-//      output_scale,
-//      output_zero_point,
-//      kSpatialDim == 2
-//          ? c10::MemoryFormat::ChannelsLast
-//          : c10::MemoryFormat::ChannelsLast3d);
   at::Tensor output = at::_empty_affine_quantized(
-            dst_dims,
-            device(c10::kCPU)
-                .dtype(c10::kQUInt8)
-                .memory_format(kSpatialDim == 2 ?
-                    c10::MemoryFormat::ChannelsLast :
-                    c10::MemoryFormat::ChannelsLast3d),
-            output_scale,
-            output_zero_point,
-            c10::nullopt);
+      dst_dims,
+      device(c10::kCPU)
+          .dtype(c10::kQUInt8)
+          .memory_format(kSpatialDim == 2 ?
+              c10::MemoryFormat::ChannelsLast :
+              c10::MemoryFormat::ChannelsLast3d),
+      output_scale,
+      output_zero_point,
+      c10::nullopt);
   ideep::tensor dst({dst_dims, ideep::tensor::data_type::u8, {output.strides().cbegin(), output.strides().cend()}},
                     output.data_ptr());
-  dst.set_zero_point(std::vector<int32_t>(1, output_zero_point));
   // Parameters
   const ideep::dims& strides = stride().vec();
   const ideep::dims& dilates = dilation().vec();
   const ideep::dims& padding_l = padding().vec();
   const ideep::dims& padding_r = padding().vec();
-  const ideep::scale_t& src_scales = src.get_scale();
+  const ideep::scale_t& src_scales = ideep::scale_t(1, 1.0/act.q_scale()); // Scales of MKLDNN and PyTorch are reciprocal
   const ideep::scale_t& weights_scales = weights.get_scale();
   const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
+  const std::vector<int32_t> src_zero_points = std::vector<int32_t>(1, act.q_zero_point());
+  const std::vector<int32_t> dst_zero_points = std::vector<int32_t>(1, output_zero_point);
   ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   op_attr.set_zero_points(DNNL_ARG_SRC, ideep::utils::tensor_zp_mask(1), {DNNL_RUNTIME_S32_VAL}); // runtime src zero point
   if (with_bias) {
@@ -904,20 +893,20 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
     if (bias_.value().get_data_handle() != orig_bias_.value().data_ptr()) {
       bias_.value().init(bias_.value().get_desc(), orig_bias_.value().data_ptr());
     }
-    auto& b = bias_.value();
+    const auto& b = bias_.value();
     if (transpose()) {
       ideep::convolution_transpose_forward::compute(
           src, weights, b, dst_dims, dst,
           strides, padding_l, padding_r, dilates,
-          groups(), src_scales, weights_scales, dst_scales, op_attr,
-          dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
+          groups(), src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
+          op_attr, dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
           ideep::u8s8, ideep::engine::cpu_engine());
     } else {
       ideep::convolution_forward::compute(
           src, weights, b, dst_dims, dst,
           strides, dilates, padding_l, padding_r, groups(),
-          src_scales, weights_scales, dst_scales, op_attr,
-          dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
+          src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
+          op_attr, dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
           ideep::u8s8, ideep::engine::cpu_engine());
     }
   } else {
@@ -925,19 +914,18 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
       ideep::convolution_transpose_forward::compute(
           src, weights, dst_dims, dst,
           strides, padding_l, padding_r, dilates,
-          groups(), src_scales, weights_scales, dst_scales, op_attr,
-          dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
+          groups(), src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
+          op_attr, dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
           ideep::u8s8, ideep::engine::cpu_engine());
     } else {
       ideep::convolution_forward::compute(
           src, weights, dst_dims, dst,
           strides, dilates, padding_l, padding_r, groups(),
-          src_scales, weights_scales, dst_scales, op_attr,
-          dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
+          src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
+          op_attr, dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
           ideep::u8s8, ideep::engine::cpu_engine());
     }
   }
-
   return output;
 }
 
