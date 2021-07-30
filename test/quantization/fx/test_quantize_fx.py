@@ -653,6 +653,7 @@ class TestQuantizeFx(QuantizationTestCase):
         # fp16 dynamic quant is not supported for qnnpack or mkldnn
         if torch.backends.quantized.engine in ('qnnpack', 'mkldnn'):
             return
+
         class Linear(torch.nn.Module):
             def __init__(self, weight):
                 super().__init__()
@@ -2012,6 +2013,7 @@ class TestQuantizeFx(QuantizationTestCase):
         # fp16 quant is not supported for qnnpack or mkldnn
         if torch.backends.quantized.engine in ('qnnpack', 'mkldnn'):
             return
+
         class Linear(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -2270,6 +2272,7 @@ class TestQuantizeFx(QuantizationTestCase):
         # fp16 quant is not supported for qnnpack or mkldnn
         if torch.backends.quantized.engine in ('qnnpack', 'mkldnn'):
             return
+
         class Linear(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -2710,6 +2713,7 @@ class TestQuantizeFxOps(QuantizationTestCase):
         # fp16 quant is not supported for qnnpack or mkldnn
         if torch.backends.quantized.engine in ('qnnpack', 'mkldnn'):
             return
+
         class FuncLinear(torch.nn.Module):
             def __init__(self, use_bias, has_relu, f_relu):
                 super(FuncLinear, self).__init__()
