@@ -443,13 +443,13 @@ at::Tensor PackedLinearWeightsMkldnn::apply_impl(
   ideep::attr_t op_attr = ReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   ideep::tensor x;
   x.init(input_desc, input_contig.data_ptr());
-  const std::vector<int32_t>& src_zero_point = std::vector<int32_t>(1, input.q_zero_point());
+  const ideep::zero_point_t& src_zero_point = ideep::zero_point_t(1, input.q_zero_point());
   auto w = *(weight_.get());
   auto dst_dims = {x.get_dim(0), w.get_dim(1)};
   const ideep::scale_t& src_scales = ideep::scale_t(1, 1.0/input.q_scale());
   const ideep::scale_t& weights_scales = w.get_scale();
   const ideep::scale_t& dst_scales = ideep::scale_t(1, 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
-  const std::vector<int32_t>& dst_zero_point = std::vector<int32_t>(1, output_zero_point);
+  const ideep::zero_point_t& dst_zero_point = ideep::zero_point_t(1, output_zero_point);
   // Compute: Use ideep::matmul_forward to support asymmetric quantization
   // Allocate output Tensor
   at::Tensor output = at::_empty_affine_quantized(

@@ -387,15 +387,15 @@ c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> PackedConvWeightsMkldnn<
   } else {
     TORCH_CHECK(false, "Unsupported qscheme: ", toString(qtype));
   }
-  bool is_one_dim_zero_point = true;
+  bool is_single_zero_point = true;
   for (int i = 1; i < wgt_zero_points.size(); ++i) {
     if (wgt_zero_points[i] != wgt_zero_points[0]) {
-      is_one_dim_zero_point = false;
+      is_single_zero_point = false;
     }
   }
   TORCH_CHECK(
-      is_one_dim_zero_point,
-      "quantized::conv_prepack: MKLDNN only supports 1-dim zero point right now");
+      is_single_zero_point,
+      "quantized::conv_prepack: MKLDNN only supports single zero point right now");
 
   // Set runtime src zero point
   auto src_zero_point = {DNNL_RUNTIME_S32_VAL};

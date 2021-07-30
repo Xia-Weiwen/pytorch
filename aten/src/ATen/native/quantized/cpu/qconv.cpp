@@ -883,8 +883,8 @@ at::Tensor PackedConvWeightsMkldnn<kSpatialDim>::apply_impl(
   const ideep::scale_t& src_scales = ideep::scale_t(1, 1.0/act.q_scale()); // Scales of MKLDNN and PyTorch are reciprocal
   const ideep::scale_t& weights_scales = weights.get_scale();
   const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of MKLDNN and PyTorch are reciprocal
-  const std::vector<int32_t> src_zero_points = std::vector<int32_t>(1, act.q_zero_point());
-  const std::vector<int32_t> dst_zero_points = std::vector<int32_t>(1, output_zero_point);
+  const ideep::zero_point_t src_zero_points = ideep::zero_point_t(1, act.q_zero_point());
+  const ideep::zero_point_t dst_zero_points = ideep::zero_point_t(1, output_zero_point);
   ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
   op_attr.set_zero_points(DNNL_ARG_SRC, ideep::utils::tensor_zp_mask(1), {DNNL_RUNTIME_S32_VAL}); // runtime src zero point
   if (with_bias) {
