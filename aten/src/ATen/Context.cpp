@@ -219,6 +219,10 @@ const std::vector<at::QEngine>& Context::supportedQEngines() {
     engines.push_back(at::kNoQEngine);
 #endif // C10_MOBILE
 
+#if AT_MKLDNN_ENABLED()
+    engines.push_back(at::kMKLDNN);
+#endif
+
 #ifdef USE_FBGEMM
     if (fbgemm::fbgemmSupportedCPU()) {
       engines.push_back(at::kFBGEMM);
