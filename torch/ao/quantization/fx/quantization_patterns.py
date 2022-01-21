@@ -209,7 +209,7 @@ binary_op_supported_dtypes : Dict[Union[Callable, str], List[Tuple[torch.dtype, 
     torch.add: all_dtypes,
     operator.mul: all_dtypes,
     torch.mul: all_dtypes,
-    torch.bmm: fp16_dtypes,
+    torch.bmm: all_dtypes,
     torch.sub: fp16_dtypes,
     operator.sub: fp16_dtypes,
     torch.div: fp16_dtypes,
@@ -335,6 +335,7 @@ class BinaryOpQuantizeHandler(QuantizeHandler):
         qbin_op_mapping: Dict[Union[Callable, str], Callable] = {
             operator.add: torch.ops.quantized.add,
             torch.add: torch.ops.quantized.add,
+            torch.bmm: torch.ops.quantized.bmm,
             operator.mul: torch.ops.quantized.mul,
             torch.mul: torch.ops.quantized.mul,
         }

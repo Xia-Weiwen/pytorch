@@ -1115,6 +1115,7 @@ aten_native_source_non_codegen_list = [
     "aten/src/ATen/native/quantized/cpu/q_avgpool3d.cpp",
     "aten/src/ATen/native/quantized/cpu/qadd.cpp",
     "aten/src/ATen/native/quantized/cpu/qbatch_norm.cpp",
+    "aten/src/ATen/native/quantized/cpu/qbmm.cpp",
     "aten/src/ATen/native/quantized/cpu/qchannel_shuffle.cpp",
     "aten/src/ATen/native/quantized/cpu/qclamp.cpp",
     "aten/src/ATen/native/quantized/cpu/qconcat.cpp",
