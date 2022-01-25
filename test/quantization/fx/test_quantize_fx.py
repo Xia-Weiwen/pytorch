@@ -4097,7 +4097,7 @@ class TestQuantizeFxOps(QuantizationTestCase):
                 super().__init__()
 
             def forward(self, x, y):
-                return x.bmm(y)
+                return torch.bmm(x, y)
 
         data = (torch.randn(1, 1, 1, dtype=torch.float),
                 torch.randn(1, 1, 1, dtype=torch.float))
@@ -4116,6 +4116,28 @@ class TestQuantizeFxOps(QuantizationTestCase):
             BinaryOpNonQuantizedInput(torch.bmm, None, False, False), data, quant_type,
             expected_node_occurrence=node_occurrence,
             custom_qconfig_dict=custom_qconfig_dict)
+
+        options = itertools.product(self.static_quant_types, [True, False])
+        for quant_type, is_reference in options:
+            if is_reference:
+                converted_node_list = [
+                    ns.call_method("dequantize"),
+                    ns.call_function(torch.bmm),
+                    ns.call_function(torch.quantize_per_tensor)
+                ]
+                quantized_node = ns.call_function(torch.bmm)
+            else:
+                converted_node_list = None
+                quantized_node = ns.call_function(torch.ops.quantized.bmm)
+
+            self.checkGraphModeFxOp(
+                BMMMethod(),
+                data,
+                quant_type,
+                quantized_node,
+                expected_node_list=converted_node_list,
+                is_reference=is_reference,
+                print_debug_info=True)
 
         # TODO: support call_method("bmm")
         # we can transform call_method("bmm") to call_function(torch.bmm)
