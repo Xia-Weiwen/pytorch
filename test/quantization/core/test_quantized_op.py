@@ -2700,7 +2700,7 @@ class TestQuantizedOps(TestCase):
         Z_scale = 1.2
         Z_zp = 6
         Z_q = qbmm(X_q, Y_q, Z_scale, Z_zp)
-        
+
         # Reference
         X_fp32 = X_q.dequantize().to(dtype=torch.float)
         Y_fp32 = Y_q.dequantize().to(dtype=torch.float)
