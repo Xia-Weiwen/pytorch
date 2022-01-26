@@ -19,7 +19,7 @@ at::Tensor quantized_bmm_fbgemm(
   TORCH_CHECK(
       X.dim() == 3 && Y.dim() == 3,
       "quantized::bmm() (FBGEMM): Input tensor ranks should both be 3 ",
-      "but got", X.dim(), " and ", Y.dim());
+      "but got ", X.dim(), " and ", Y.dim());
   // Reference implementation: dequantize - bmm - quantize
   // Inputs
   auto dqx = X.dequantize();
@@ -40,7 +40,7 @@ at::Tensor quantized_bmm_qnnpack(
   TORCH_CHECK(
       X.dim() == 3 && Y.dim() == 3,
       "quantized::bmm() (QNNPACK): Input tensor ranks should both be 3 ",
-      "but got", X.dim(), " and ", Y.dim());
+      "but got ", X.dim(), " and ", Y.dim());
   // Reference implementation: dequantize - bmm - quantize
   // Inputs
   auto dqx = X.dequantize();
@@ -61,7 +61,7 @@ at::Tensor quantized_bmm_onednn(
   TORCH_CHECK(
       X.dim() == 3 && Y.dim() == 3,
       "quantized::bmm() (ONEDNN): Input tensor ranks should both be 3 ",
-      "but got", X.dim(), " and ", Y.dim());
+      "but got ", X.dim(), " and ", Y.dim());
 
   TORCH_CHECK(X.scalar_type() == c10::ScalarType::QUInt8 &&
       Y.scalar_type() == c10::ScalarType::QUInt8,
