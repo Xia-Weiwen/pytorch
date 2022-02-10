@@ -215,6 +215,7 @@ binary_op_supported_dtypes : Dict[Union[Callable, str], List[Tuple[torch.dtype, 
     operator.sub: fp16_dtypes,
     torch.div: fp16_dtypes,
     operator.truediv: fp16_dtypes,
+    torch.matmul: all_dtypes,
 }
 
 default_op_supported_dtypes = {
@@ -302,6 +303,7 @@ def _to_reference(float_module, weight_qparams):
 @register_quant_pattern(torch.mul)
 @register_quant_pattern(torch.div)
 @register_quant_pattern(torch.bmm)
+@register_quant_pattern(torch.matmul)
 @register_quant_pattern((torch.nn.ReLU, operator.add))
 @register_quant_pattern((torch.nn.ReLU, operator.mul))
 @register_quant_pattern((torch.nn.ReLU, torch.add))
@@ -341,6 +343,7 @@ class BinaryOpQuantizeHandler(QuantizeHandler):
             torch.bmm: torch.ops.quantized.bmm,
             operator.mul: torch.ops.quantized.mul,
             torch.mul: torch.ops.quantized.mul,
+            torch.matmul: torch.ops.quantized.matmul,
         }
         qbin_relu_op_mapping: Dict[Union[Callable, str], Callable] = {
             operator.add: torch.ops.quantized.add_relu,
