@@ -103,6 +103,11 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
       double output_scale,
       int64_t output_zero_point) override;
 
+  at::Tensor apply_gelu(
+      const at::Tensor& input,
+      double output_scale,
+      int64_t output_zero_point) override;
+
   at::Tensor apply_dynamic(
       const at::Tensor& input,
       bool reduce_range) override;
@@ -144,7 +149,7 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
   }
 
  private:
-  template <bool ReluFused>
+  template <bool ReluFused, bool GeluFused>
   at::Tensor apply_impl(
       const at::Tensor& input,
       double output_scale,

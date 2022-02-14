@@ -13,6 +13,7 @@
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <torch/library.h>
+#include <ATen/native/Activation.h>
 
 #include <c10/util/irange.h>
 
@@ -275,6 +276,37 @@ at::Tensor PackedConvWeight<kSpatialDim>::apply_relu(
     double output_scale,
     int64_t output_zero_point) {
   return apply_impl<true>(input, output_scale, output_zero_point);
+}
+
+template <int kSpatialDim>
+at::Tensor PackedConvWeight<kSpatialDim>::apply_gelu(
+    const at::Tensor& input,
+    double output_scale,
+    int64_t output_zero_point) {
+  // Ref path:
+  // dequantize -> conv -> gelu -> quantize
+  at::Tensor orig_weight;
+  c10::optional<at::Tensor> orig_bias;
+  std::tie(orig_weight, orig_bias) = unpack();
+  std::vector<int64_t> strides, pads, dils;
+  for (int i = 0; i < stride().size(); ++i) {
+    strides.push_back(stride()[i]);
+    pads.push_back(padding()[i]);
+    dils.push_back(dilation()[i]);
+  }
+  std::vector<int64_t> out_pads(input.dim() - 2);
+  auto conv_out = at::native::convolution(
+      input.dequantize(), orig_weight.dequantize(),
+      orig_bias,
+      strides,
+      pads,
+      dils,
+      false, /* transposed */
+      out_pads,
+      groups());
+  auto out = at::gelu(conv_out);
+  return at::quantize_per_tensor(
+      out, output_scale, output_zero_point, c10::kQUInt8);
 }
 
 template <int kSpatialDim>
@@ -551,12 +583,22 @@ template at::Tensor PackedConvWeight<2>::apply_relu(
     double output_scale,
     int64_t output_zero_point);
 
+template at::Tensor PackedConvWeight<2>::apply_gelu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
 template at::Tensor PackedConvWeight<3>::apply(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
 
 template at::Tensor PackedConvWeight<3>::apply_relu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeight<3>::apply_gelu(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
@@ -589,6 +631,37 @@ at::Tensor PackedConvWeightsQnnp<kSpatialDim>::apply_relu(
     double output_scale,
     int64_t output_zero_point) {
   return apply_impl<true>(input, output_scale, output_zero_point);
+}
+
+template <int kSpatialDim>
+at::Tensor PackedConvWeightsQnnp<kSpatialDim>::apply_gelu(
+    const at::Tensor& input,
+    double output_scale,
+    int64_t output_zero_point) {
+  // Ref path:
+  // dequantize -> conv -> gelu -> quantize
+  at::Tensor orig_weight;
+  c10::optional<at::Tensor> orig_bias;
+  std::tie(orig_weight, orig_bias) = unpack();
+  std::vector<int64_t> strides, pads, dils;
+  for (int i = 0; i < stride().size(); ++i) {
+    strides.push_back(stride()[i]);
+    pads.push_back(padding()[i]);
+    dils.push_back(dilation()[i]);
+  }
+  std::vector<int64_t> out_pads(input.dim() - 2);
+  auto conv_out = at::native::convolution(
+      input.dequantize(), orig_weight.dequantize(),
+      orig_bias,
+      strides,
+      pads,
+      dils,
+      false, /* transposed */
+      out_pads,
+      groups());
+  auto out = at::gelu(conv_out);
+  return at::quantize_per_tensor(
+      out, output_scale, output_zero_point, c10::kQUInt8);
 }
 
 template <int kSpatialDim>
@@ -817,12 +890,22 @@ template at::Tensor PackedConvWeightsQnnp<2>::apply_relu(
     double output_scale,
     int64_t output_zero_point);
 
+template at::Tensor PackedConvWeightsQnnp<2>::apply_gelu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
 template at::Tensor PackedConvWeightsQnnp<3>::apply(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
 
 template at::Tensor PackedConvWeightsQnnp<3>::apply_relu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeightsQnnp<3>::apply_gelu(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
@@ -845,7 +928,7 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply(
     const at::Tensor& input,
     double output_scale,
     int64_t output_zero_point) {
-  return apply_impl<false>(input, output_scale, output_zero_point);
+  return apply_impl<false, false>(input, output_scale, output_zero_point);
 }
 
 template <int kSpatialDim>
@@ -853,11 +936,19 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_relu(
     const at::Tensor& input,
     double output_scale,
     int64_t output_zero_point) {
-  return apply_impl<true>(input, output_scale, output_zero_point);
+  return apply_impl<true, false>(input, output_scale, output_zero_point);
 }
 
 template <int kSpatialDim>
-template <bool kReluFused>
+at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_gelu(
+    const at::Tensor& input,
+    double output_scale,
+    int64_t output_zero_point) {
+  return apply_impl<false, true>(input, output_scale, output_zero_point);
+}
+
+template <int kSpatialDim>
+template <bool kReluFused, bool kGeluFused>
 at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
     const at::Tensor& act,
     double output_scale,
@@ -869,12 +960,16 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   func_name += std::to_string(kSpatialDim) + "d";
   if (kReluFused) {
     func_name += "_relu";
+  } else if (kGeluFused) {
+    func_name += "_gelu";
   }
   ConvDimChecks<kSpatialDim>(
       act.ndimension(), stride().size(), padding().size(),
       output_padding().size(), dilation().size(), func_name, transpose());
   TORCH_CHECK(act.scalar_type() == c10::ScalarType::QUInt8,
       func_name, " (ONEDNN): data type of input should be QUint8.");
+  TORCH_CHECK(!kReluFused || !kGeluFused,
+      func_name, " (ONEDNN): cannot fuse with relu and gelu at the same time.");
 
   // src
   auto act_contig = act.contiguous(kSpatialDim == 2 ? c10::MemoryFormat::ChannelsLast : c10::MemoryFormat::ChannelsLast3d);
@@ -945,7 +1040,8 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // Scales of ONEDNN and PyTorch are reciprocal
   const ideep::zero_point_t src_zero_points = ideep::zero_point_t(1, act.q_zero_point());
   const ideep::zero_point_t dst_zero_points = ideep::zero_point_t(1, output_zero_point);
-  ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
+  ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() :
+                          kGeluFused ? ideep::attr_t::fuse_gelu() : ideep::attr_t();
   op_attr.set_zero_points(DNNL_ARG_SRC, ideep::utils::tensor_zp_mask(1), {DNNL_RUNTIME_S32_VAL}); // runtime src zero point
   if (with_bias) {
     // Bias might be modified outside (e.g. by quantization bias correction).
@@ -999,12 +1095,22 @@ template at::Tensor PackedConvWeightsOnednn<2>::apply_relu(
     double output_scale,
     int64_t output_zero_point);
 
+template at::Tensor PackedConvWeightsOnednn<2>::apply_gelu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
 template at::Tensor PackedConvWeightsOnednn<3>::apply(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
 
 template at::Tensor PackedConvWeightsOnednn<3>::apply_relu(
+    const at::Tensor& act,
+    double output_scale,
+    int64_t output_zero_point);
+
+template at::Tensor PackedConvWeightsOnednn<3>::apply_gelu(
     const at::Tensor& act,
     double output_scale,
     int64_t output_zero_point);
@@ -1081,6 +1187,22 @@ class QConv1dInt8 final {
   }
 };
 
+class QConv1dGeluInt8 final {
+ public:
+  static Tensor run(
+      Tensor act,
+      const c10::intrusive_ptr<ConvPackedParamsBase<2>>& packed_weight,
+      double output_scale,
+      int64_t output_zero_point) {
+    at::Tensor output;
+    // N, C, L -> N, C, 1, L
+    act = act.unsqueeze(quant_utils::kConv1dSqueezeDim + 2);
+    output = packed_weight->apply_gelu(act, output_scale, output_zero_point);
+    // N, C, 1, L -> N, C, L
+    return output.squeeze_(quant_utils::kConv1dSqueezeDim + 2);
+  }
+};
+
 // kernel for maintaining backward compatibility
 template <int kSpatialDim, bool kReluFused>
 class QConvInt8ForBC final {
@@ -1113,6 +1235,7 @@ class QConvInt8ForBC final {
 TORCH_LIBRARY_IMPL(quantized, QuantizedCPU, m) {
   m.impl(TORCH_SELECTIVE_NAME("quantized::conv1d"),          QConv1dInt8<false>::run);
   m.impl(TORCH_SELECTIVE_NAME("quantized::conv1d_relu"),     QConv1dInt8<true>::run);
+  m.impl(TORCH_SELECTIVE_NAME("quantized::conv1d_gelu"),     QConv1dGeluInt8::run);
   m.impl(TORCH_SELECTIVE_NAME("quantized::conv2d.new"),      QConvInt8<2, false>::run);
   m.impl(TORCH_SELECTIVE_NAME("quantized::conv2d_relu.new"), QConvInt8<2, true>::run);
   m.impl(TORCH_SELECTIVE_NAME("quantized::conv3d.new"),      QConvInt8<3, false>::run);
