@@ -648,7 +648,6 @@ class TestFXGraphMatcher(QuantizationTestCase):
             if qhandler_cls == qp.BinaryOpQuantizeHandler:
                 # these ops do not have quantized equivalents
                 ops_to_skip = [
-                    torch.bmm,
                     torch.div,
                     torch.sub,
                     operator.truediv,

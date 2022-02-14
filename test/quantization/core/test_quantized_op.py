@@ -2651,65 +2651,66 @@ class TestQuantizedOps(TestCase):
                     # Verify the result is scriptable
                     mha_quantized_scripted = torch.jit.script(mha_quantized)
 
-    @given(batch_size=st.integers(1, 4),
-           input_batch=st.integers(1, 4),
-           input_channels=st.integers(16, 32),
-           output_channels=st.integers(4, 8))
     @override_qengines
-    def test_bmm(self, batch_size, input_batch, input_channels, output_channels):
+    def test_bmm(self):
+        batch_size_list = (1, 2, 4)
+        input_batch_list = (1, 2, 4)
+        input_channel_list = (16, 24, 32)
+        output_channel_list = (4, 6, 8)
         qbmm = torch.ops.quantized.bmm
         bmm = torch.bmm
         value_min = 0
         value_max = 255
 
-        X_scale = np.random.rand()
-        X_zp = np.round(np.random.rand() * 100).astype(np.int32)
-        X_q0 = np.round(
-            np.random.rand(input_batch, input_channels * batch_size) *
-            (value_max - value_min) + value_min
-        ).astype(np.uint8)
+        test_cases = itertools.product(batch_size_list, input_batch_list,
+                                       input_channel_list, output_channel_list)
+        for bs, ib, ic, oc in test_cases:
+            X_scale = np.random.rand()
+            X_zp = np.round(np.random.rand() * 100).astype(np.int32)
+            X_q0 = np.round(
+                np.random.rand(ib, ic * bs) * (value_max - value_min) + value_min
+            ).astype(np.uint8)
 
-        Y_scale = np.random.rand()
-        Y_zp = np.round(np.random.rand() * 100).astype(np.int32)
-        Y_q0 = np.round(
-            np.random.rand(output_channels, input_channels * batch_size)
-            * (value_max - value_min) + value_min
-        ).astype(np.uint8)
+            Y_scale = np.random.rand()
+            Y_zp = np.round(np.random.rand() * 100).astype(np.int32)
+            Y_q0 = np.round(
+                np.random.rand(oc, ic * bs) * (value_max - value_min) + value_min
+            ).astype(np.uint8)
 
-        avoid_vpmaddubsw_overflow_linear(
-            input_batch,
-            input_channels * batch_size,
-            output_channels,
-            X_q0,
-            value_min,
-            value_max,
-            Y_q0,
-            value_min,
-            value_max,
-        )
-        X_q0 = X_q0.reshape(batch_size, input_batch, input_channels)
-        Y_q0 = Y_q0.reshape(batch_size, input_channels, output_channels)
-        X = torch.from_numpy(_dequantize(
-            X_q0, X_scale, X_zp)).to(dtype=torch.float)
-        X_q = torch.quantize_per_tensor(
-            X, scale=X_scale, zero_point=X_zp, dtype=torch.quint8)
-        Y = torch.from_numpy(_dequantize(
-            Y_q0, Y_scale, Y_zp)).to(dtype=torch.float)
-        Y_q = torch.quantize_per_tensor(
-            Y, scale=Y_scale, zero_point=Y_zp, dtype=torch.quint8)
-        Z_scale = 1.2
-        Z_zp = 6
-        Z_q = qbmm(X_q, Y_q, Z_scale, Z_zp)
+            avoid_vpmaddubsw_overflow_linear(
+                ib,
+                ic * bs,
+                oc,
+                X_q0,
+                value_min,
+                value_max,
+                Y_q0,
+                value_min,
+                value_max,
+            )
+            X_q0 = X_q0.reshape(bs, ib, ic)
+            Y_q0 = Y_q0.reshape(bs, ic, oc)
+            X = torch.from_numpy(_dequantize(
+                X_q0, X_scale, X_zp)).to(dtype=torch.float)
+            X_q = torch.quantize_per_tensor(
+                X, scale=X_scale, zero_point=X_zp, dtype=torch.quint8)
+            Y = torch.from_numpy(_dequantize(
+                Y_q0, Y_scale, Y_zp)).to(dtype=torch.float)
+            Y_q = torch.quantize_per_tensor(
+                Y, scale=Y_scale, zero_point=Y_zp, dtype=torch.quint8)
+            Z_scale = 1.2
+            Z_zp = 6
+            Z_q = qbmm(X_q, Y_q, Z_scale, Z_zp)
 
-        # Reference
-        X_fp32 = X_q.dequantize().to(dtype=torch.float)
-        Y_fp32 = Y_q.dequantize().to(dtype=torch.float)
-        Z_fp32 = bmm(X_fp32, Y_fp32)
-        Z_q_ref = torch.quantize_per_tensor(Z_fp32, Z_scale, Z_zp, dtype=torch.quint8)
-        np.testing.assert_array_almost_equal(
-            Z_q_ref.int_repr().numpy(),
-            Z_q.int_repr().numpy(),
-            decimal=8)
+            # Reference
+            X_fp32 = X_q.dequantize().to(dtype=torch.float)
+            Y_fp32 = Y_q.dequantize().to(dtype=torch.float)
+            Z_fp32 = bmm(X_fp32, Y_fp32)
+            Z_q_ref = torch.quantize_per_tensor(Z_fp32, Z_scale, Z_zp, dtype=torch.quint8)
+            np.testing.assert_array_almost_equal(
+                Z_q_ref.int_repr().numpy(),
+                Z_q.int_repr().numpy(),
+                decimal=8)
 
 
 class TestDynamicQuantizedOps(TestCase):
