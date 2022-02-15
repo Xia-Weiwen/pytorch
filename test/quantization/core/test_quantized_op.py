@@ -2712,6 +2712,85 @@ class TestQuantizedOps(TestCase):
                 Z_q.int_repr().numpy(),
                 decimal=8)
 
+    @override_qengines
+    def test_matmul(self):
+        x_dim_list = (1, 2, 3, 4)
+        y_dim_list = (1, 2, 3, 4)
+        input_batch_list = (2, 4)
+        input_channel_list = (4, 8)
+        output_channel_list = (2, 4)
+        broadcast_batch_list = [True, False]
+        qmatmul = torch.ops.quantized.matmul
+        matmul = torch.matmul
+        value_min = 0
+        value_max = 255
+
+        test_cases = itertools.product(x_dim_list, y_dim_list,
+                                       input_batch_list, input_channel_list,
+                                       output_channel_list,
+                                       broadcast_batch_list)
+        for x_dim, y_dim, ib, ic, oc, broadcast in test_cases:
+            # Only broadcast on batches
+            if (x_dim <= 2 or y_dim <= 2) and broadcast:
+                continue
+            nominal_ib = ib if x_dim > 1 else 1
+            nominal_oc = oc if y_dim > 1 else 1
+            b0_x = np.round(np.random.rand() * 8).astype(np.int32) if x_dim > 3 else 1
+            b1_x = np.round(np.random.rand() * 8).astype(np.int32) if x_dim > 2 else 1
+            b0_y = 1 if broadcast or y_dim <= 3 else b0_x
+            b1_y = 1 if broadcast or y_dim <= 2 else b1_x
+            nominal_ib = nominal_ib * b0_x * b1_x
+            nominal_oc = nominal_oc * b0_y * b1_y
+
+            x_sizes = ((ic,), (ib, ic), (b1_x, ib, ic), (b0_x, b1_x, ib, ic))[x_dim - 1]
+            y_sizes = ((ic,), (ic, oc), (b1_y, ic, oc), (b0_y, b1_y, ic, oc))[y_dim - 1]
+
+            X_scale = np.random.rand()
+            X_zp = np.round(np.random.rand() * 10).astype(np.int32)
+            X_q0 = np.round(
+                np.random.rand(nominal_ib, ic) * (value_max - value_min) + value_min
+            ).astype(np.uint8)
+
+            Y_scale = np.random.rand()
+            Y_zp = np.round(np.random.rand() * 10).astype(np.int32)
+            Y_q0 = np.round(
+                np.random.rand(nominal_oc, ic) * (value_max - value_min) + value_min
+            ).astype(np.uint8)
+
+            avoid_vpmaddubsw_overflow_linear(
+                nominal_ib,
+                ic,
+                nominal_oc,
+                X_q0,
+                value_min,
+                value_max,
+                Y_q0,
+                value_min,
+                value_max,
+            )
+            X_q0 = X_q0.reshape(x_sizes)
+            Y_q0 = Y_q0.reshape(y_sizes)
+            X = torch.from_numpy(_dequantize(
+                X_q0, X_scale, X_zp)).to(dtype=torch.float)
+            X_q = torch.quantize_per_tensor(
+                X, scale=X_scale, zero_point=X_zp, dtype=torch.quint8)
+            Y = torch.from_numpy(_dequantize(
+                Y_q0, Y_scale, Y_zp)).to(dtype=torch.float)
+            Y_q = torch.quantize_per_tensor(
+                Y, scale=Y_scale, zero_point=Y_zp, dtype=torch.quint8)
+            Z_scale = 1.2
+            Z_zp = 6
+            Z_q = qmatmul(X_q, Y_q, Z_scale, Z_zp)
+
+            # Reference
+            X_fp32 = X_q.dequantize().to(dtype=torch.float)
+            Y_fp32 = Y_q.dequantize().to(dtype=torch.float)
+            Z_fp32 = matmul(X_fp32, Y_fp32)
+            Z_q_ref = torch.quantize_per_tensor(Z_fp32, Z_scale, Z_zp, dtype=torch.quint8)
+            np.testing.assert_array_almost_equal(
+                Z_q_ref.int_repr().numpy(),
+                Z_q.int_repr().numpy(),
+                decimal=8)
 
 class TestDynamicQuantizedOps(TestCase):
     """Tests the correctness of the dynamic quantized linear and linear_relu op."""
