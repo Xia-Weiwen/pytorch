@@ -4185,6 +4185,54 @@ class TestQuantizeFxOps(QuantizationTestCase):
         #     custom_qconfig_dict=custom_qconfig_dict,
         #     print_debug_info=True)
 
+    def test_matmul(self):
+        class MatmulMethod(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, x, y):
+                return torch.matmul(x, y)
+
+        data = (torch.randn(1, 1, 1, 1, dtype=torch.float),
+                torch.randn(1, 1, 1, 1, dtype=torch.float))
+        quant_type = QuantType.STATIC
+        # testing for fp16 static quant
+        # we are producing fp16 patterns
+        custom_qconfig_dict = {
+            "object_type": [(torch.matmul, float16_static_qconfig),
+                            ("matmul", float16_static_qconfig)]
+        }
+        node_occurrence = {
+            # input_matmul1, input_matmul2, output_matmul
+            ns.call_method("to"): 3
+        }
+        self.checkGraphModeFxOp(
+            BinaryOpNonQuantizedInput(torch.matmul, None, False, False), data, quant_type,
+            expected_node_occurrence=node_occurrence,
+            custom_qconfig_dict=custom_qconfig_dict)
+
+        options = itertools.product(self.static_quant_types, [True, False])
+        for quant_type, is_reference in options:
+            if is_reference:
+                converted_node_list = [
+                    ns.call_method("dequantize"),
+                    ns.call_function(torch.matmul),
+                    ns.call_function(torch.quantize_per_tensor)
+                ]
+                quantized_node = ns.call_function(torch.matmul)
+            else:
+                converted_node_list = None
+                quantized_node = ns.call_function(torch.ops.quantized.matmul)
+
+            self.checkGraphModeFxOp(
+                MatmulMethod(),
+                data,
+                quant_type,
+                quantized_node,
+                expected_node_list=converted_node_list,
+                is_reference=is_reference,
+                print_debug_info=False)
+
     @skipIfNoFBGEMM
     def test_add_relu(self):
         self._test_binary_op_relu_int8_impl(
