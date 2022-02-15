@@ -4175,7 +4175,7 @@ class TestQuantizeFxOps(QuantizationTestCase):
                 quantized_node,
                 expected_node_list=converted_node_list,
                 is_reference=is_reference,
-                print_debug_info=True)
+                print_debug_info=False)
 
         # TODO: support call_method("bmm")
         # we can transform call_method("bmm") to call_function(torch.bmm)
