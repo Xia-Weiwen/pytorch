@@ -50,7 +50,8 @@ at::Tensor quantized_matmul_onednn(
     at::Tensor Y,
     double output_scale,
     int64_t output_zero_point) {
-  if (X.dim() != Y.dim() || X.dim() <= 1) { // Go to ref path
+  // Go to ref path
+  if (X.dim() != Y.dim() || X.dim() <= 1) {
     // Reference implementation: dequantize - matmul - quantize
     // Inputs
     auto dqx = X.dequantize();
@@ -76,14 +77,26 @@ at::Tensor quantized_matmul_onednn(
   int64_t K_x = X.size(x_dims.size() - 1);
   int64_t K_y = Y.size(y_dims.size() - 2);
   int64_t N = Y.size(y_dims.size() - 1);
-  std::string str_x_sizes, str_y_sizes;
-  for (int i = 0; i < x_dims.size(); ++i) {
-    str_x_sizes += std::to_string(x_dims[i]) + ",";
-    str_y_sizes += std::to_string(y_dims[i]) + ",";
+  // Broadcast on batch is supported.
+  // Batches of the two inputs should be 1 or equal.
+  bool batch_match = true;
+  for (int i = 0; i < batches_x.size(); ++i) {
+    if (batches_x[i] != batches_y[i] &&
+        batches_x[i] != 1 &&
+        batches_y[i] != 1) {
+      batch_match = false;
+    }
   }
-  TORCH_CHECK(batches_x == batches_y && K_x == K_y,
-      "quantized::matmul() (ONEDNN): Shapes of inputs mismatch, got (",
-      str_x_sizes, ") and (", str_y_sizes, ")");
+  if (!batch_match || K_x != K_y) {
+    std::string str_x_sizes, str_y_sizes;
+    for (int i = 0; i < x_dims.size(); ++i) {
+      str_x_sizes += std::to_string(x_dims[i]) + ",";
+      str_y_sizes += std::to_string(y_dims[i]) + ",";
+    }
+    TORCH_CHECK(false,
+        "quantized::matmul() (ONEDNN): Shapes of inputs mismatch, got [",
+        str_x_sizes, "] and [", str_y_sizes, "]");
+  }
 
   // src_0: dtype = u8
   auto x_data_type = dnnl::memory::data_type::u8;
