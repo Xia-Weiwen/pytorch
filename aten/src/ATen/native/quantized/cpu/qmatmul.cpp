@@ -50,52 +50,84 @@ at::Tensor quantized_matmul_onednn(
     at::Tensor Y,
     double output_scale,
     int64_t output_zero_point) {
-  // Go to ref path
-  if (X.dim() != Y.dim() || X.dim() <= 1) {
-    // Reference implementation: dequantize - matmul - quantize
-    // Inputs
-    auto dqx = X.dequantize();
-    auto dqy = Y.dequantize();
-    // Output
-    auto z = at::matmul(dqx, dqy);
-    return at::quantize_per_tensor(
-        z, output_scale, output_zero_point, c10::kQUInt8);
-  }
-
   TORCH_CHECK(X.scalar_type() == c10::ScalarType::QUInt8 &&
       Y.scalar_type() == c10::ScalarType::QUInt8,
       "quantized::matmul() (ONEDNN): data type of inputs should be QUint8.");
 
+  // Cases of input shapes
+  // - If X.ndims == Y.ndims == 1, reshape them to (1, K) and (K, 1)
+  // - If X.ndims >= 2 and Y.ndims == 1, reshape Y to (..., K, 1)
+  // - If X.ndims == 1 and Y.ndims >= 2, reshape X to (..., 1, K)
+  // - If X.ndims >= 2 and Y.ndims >= 2, add additional batch dimensions
+  //    so that X & Y have the same dimensions
   auto x_dims = X.sizes().vec();
   auto y_dims = Y.sizes().vec();
-  std::vector<int64_t> batches_x, batches_y;
-  if (X.dim() > 2) {
-    batches_x = std::vector<int64_t>(x_dims.begin(), x_dims.end() - 2);
-    batches_y = std::vector<int64_t>(y_dims.begin(), y_dims.end() - 2);
-  }
-  int64_t M = X.size(x_dims.size() - 2);
-  int64_t K_x = X.size(x_dims.size() - 1);
-  int64_t K_y = Y.size(y_dims.size() - 2);
-  int64_t N = Y.size(y_dims.size() - 1);
-  // Broadcast on batch is supported.
-  // Batches of the two inputs should be 1 or equal.
-  bool batch_match = true;
-  for (int i = 0; i < batches_x.size(); ++i) {
-    if (batches_x[i] != batches_y[i] &&
-        batches_x[i] != 1 &&
-        batches_y[i] != 1) {
-      batch_match = false;
+  std::vector<int64_t> z_dims; // for computation
+  std::vector<int64_t> z_dims_expected; // for output
+  bool z_need_reshape = false;
+  if (x_dims.size() == 1 && y_dims.size() == 1) {
+    TORCH_CHECK(x_dims[0] == y_dims[0],
+        "quantized::matmul() (ONEDNN): (vec x vec) Input shapes mismatch, got ",
+        X.sizes(), " and ", Y.sizes());
+    x_dims.insert(x_dims.begin(), 1);
+    y_dims.push_back(1);
+    z_dims = {1, 1};
+    z_dims_expected = {1};
+    z_need_reshape = true;
+  } else if (x_dims.size() >= 2 && y_dims.size() == 1) {
+    TORCH_CHECK(x_dims[x_dims.size() - 1] == y_dims[0],
+        "quantized::matmul() (ONEDNN): (mat x vec) Input shapes mismatch, got ",
+        X.sizes(), " and ", Y.sizes());
+    y_dims.push_back(1);
+    while (y_dims.size() < x_dims.size()) {
+      y_dims.insert(y_dims.begin(), 1);
     }
-  }
-  if (!batch_match || K_x != K_y) {
-    std::string str_x_sizes, str_y_sizes;
-    for (int i = 0; i < x_dims.size(); ++i) {
-      str_x_sizes += std::to_string(x_dims[i]) + ",";
-      str_y_sizes += std::to_string(y_dims[i]) + ",";
+    z_dims = x_dims;
+    z_dims[z_dims.size() - 1] = 1;
+    z_dims_expected = x_dims;
+    z_dims_expected.pop_back();
+    z_need_reshape = true;
+  } else if (x_dims.size() == 1 && y_dims.size() >= 2) {
+    TORCH_CHECK(x_dims[0] == y_dims[y_dims.size() - 2],
+        "quantized::matmul() (ONEDNN): (vec x mat) Input shapes mismatch, got ",
+        X.sizes(), " and ", Y.sizes());
+    while (x_dims.size() < y_dims.size()) {
+      x_dims.insert(x_dims.begin(), 1);
     }
-    TORCH_CHECK(false,
-        "quantized::matmul() (ONEDNN): Shapes of inputs mismatch, got [",
-        str_x_sizes, "] and [", str_y_sizes, "]");
+    z_dims = y_dims;
+    z_dims[z_dims.size() - 2] = 1;
+    z_dims_expected = z_dims;
+    z_dims_expected.erase(z_dims_expected.end() - 2);
+    z_need_reshape = true;
+  } else { // both sizes >= 2
+    while (x_dims.size() < y_dims.size()) {
+      x_dims.insert(x_dims.begin(), 1);
+    }
+    while (y_dims.size() < x_dims.size()) {
+      y_dims.insert(y_dims.begin(), 1);
+    }
+    // Broadcast on batch is supported.
+    // Batches of the two inputs should be 1 or equal.
+    bool batch_match = true;
+    auto batch_ndims = x_dims.size() - 2;
+    for (int i = 0; i < batch_ndims; ++i) {
+      if (x_dims[i] != y_dims[i] &&
+          x_dims[i] != 1 &&
+          y_dims[i] != 1) {
+        batch_match = false;
+      }
+      auto b = std::min(x_dims[i], y_dims[i]) == 0 ?
+               0 : std::max(x_dims[i], y_dims[i]);
+      z_dims.push_back(b);
+    }
+    auto x_ndims = x_dims.size(), y_ndims = y_dims.size();
+    TORCH_CHECK(
+        x_dims[x_ndims - 1] == y_dims[y_ndims - 2] && batch_match,
+        "quantized::matmul() (ONEDNN): (mat x mat) Input shapes mismatch, got ",
+        X.sizes(), " and ", Y.sizes());
+    z_dims.push_back(x_dims[x_ndims - 2]);
+    z_dims.push_back(y_dims[y_ndims - 1]);
+    z_dims_expected = z_dims;
   }
 
   // src_0: dtype = u8
@@ -125,15 +157,15 @@ at::Tensor quantized_matmul_onednn(
   y_u8.reorder_to(y_s8, reorder_attr);
 
   // Allocate output Tensor
-  auto z_dims = batches_x;
-  z_dims.push_back(M);
-  z_dims.push_back(N);
   at::Tensor output = at::_empty_affine_quantized(
       z_dims,
       at::device(c10::kCPU).dtype(c10::kQUInt8),
       output_scale,
       output_zero_point);
   if (output.numel() == 0) {
+    if (z_need_reshape) {
+      return output.reshape(z_dims_expected);
+    }
     return output;
   }
   ideep::tensor::desc z_desc = {
@@ -173,6 +205,9 @@ at::Tensor quantized_matmul_onednn(
                            {{DNNL_ARG_SRC, expected_x},
                             {DNNL_ARG_WEIGHTS, expected_y},
                             {DNNL_ARG_DST, z}});
+  if (z_need_reshape) {
+    return output.reshape(z_dims_expected);
+  }
   return output;
 }
 #endif // #if AT_MKLDNN_ENABLED()
