@@ -1254,7 +1254,9 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   int64_t input_zp = act.q_zero_point();
   const ideep::scale_t& src_scales = ideep::scale_t(1, 1.0/input_scale); // Scales of ONEDNN and PyTorch are reciprocal
   const ideep::scale_t& weights_scales = weights.get_scale();
-  const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // ditto
+  int64_t scale_size = weights_scales.size();
+  double inv_output_scale = 1.0/output_scale;
+  // const ideep::scale_t& dst_scales = ideep::scale_t(weights_scales.size(), 1.0/output_scale); // ditto
   const ideep::zero_point_t src_zero_points = ideep::zero_point_t(1, input_zp);
   const ideep::zero_point_t dst_zero_points = ideep::zero_point_t(1, output_zero_point);
   ideep::attr_t op_attr = kReluFused ? ideep::attr_t::fuse_relu() : ideep::attr_t();
@@ -1267,79 +1269,47 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   }
   const auto& b = with_bias ? bias_.value() : ideep::tensor();
   if (transpose()) {
-    if (with_bias) {
-      ideep::convolution_transpose_forward::compute_v2(
-          src, weights, b, dst_dims, dst,
-          strides, padding_l, padding_r, dilates,
-          groups(), src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
-          op_attr, dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
-          ideep::u8s8, ideep::engine::cpu_engine());
-    } else {
-      ideep::convolution_transpose_forward::compute_v2(
-          src, weights, dst_dims, dst,
-          strides, padding_l, padding_r, dilates,
-          groups(), src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
-          op_attr, dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
-          ideep::u8s8, ideep::engine::cpu_engine());
-    }
+    ideep::convolution_transpose_forward::compute_v2(
+        src, weights, b, with_bias, dst_dims, dst,
+        strides, padding_l, padding_r, dilates,
+        groups(), src_scales, weights_scales,
+        ideep::scale_t(scale_size, inv_output_scale),
+        src_zero_points, dst_zero_points, op_attr,
+        dnnl::algorithm::deconvolution_direct, dnnl::prop_kind::forward_inference,
+        ideep::u8s8, ideep::engine::cpu_engine());
   } else {
-    // When this function is called for the first time, cache is invalid.
-    // Then there would be either cache hit or miss thereafter.
-    // If hit, use cached data. If miss, fall back to normal path.
+    // Cache is constructed when called for the first time.
     // Cache won't be updated once initialized.
-    src.set_zero_point(src_zero_points);
-    dst.set_zero_point(dst_zero_points);
-    if (!get_cache().valid()) {
-      ConvParams conv_params;
-      if (with_bias) {
+    PrimitiveCacheKey cache_key(
+        input_scale, input_zp, src_dims, output_scale, output_zero_point);
+    std::once_flag cache_initialized_flag;
+    std::call_once(cache_initialized_flag, [&](){
+        ConvParams conv_params;
         ideep::convolution_forward::prepare(
-            conv_params, src, weights, b, dst_dims, dst,
+            conv_params, src, weights, b, with_bias, dst_dims, dst,
             strides, dilates, padding_l, padding_r, groups(),
-            src_scales, weights_scales, dst_scales, op_attr,
+            src_scales, weights_scales, ideep::scale_t(scale_size, inv_output_scale),
+            src_zero_points, dst_zero_points, op_attr,
             dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
             ideep::u8s8, ideep::engine::cpu_engine());
-        ideep::convolution_forward::compute(conv_params, src, weights, b, dst);
-      } else {
-        ideep::convolution_forward::prepare(
-            conv_params, src, weights, dst_dims, dst,
-            strides, dilates, padding_l, padding_r, groups(),
-            src_scales, weights_scales, dst_scales, op_attr,
-            dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
-            ideep::u8s8, ideep::engine::cpu_engine());
-        ideep::convolution_forward::compute(conv_params, src, weights, dst);
-      }
-      get_cache().set(input_scale, input_zp, src_dims,
-                      output_scale, output_zero_point, conv_params);
-    } else if (get_cache().hit(
-        input_scale, input_zp, src_dims, output_scale, output_zero_point)) {
-      // Cache hit. Use cached data. No need to prepare.
-      ConvParams& conv_params = get_cache().get_conv_params();
-      Conv& primitive = get_cache().get_conv_primitive();
+        get_cache() = ConvPrimitiveCache(cache_key, conv_params.pd, conv_params.bias_attr);
+    });
+    // If hit, use cached data. If miss, fall back to normal path.
+    if (get_cache().hit(cache_key)) {
+      ConvDesc& pd = get_cache().get_primitive_desc();
+      Conv& primitive = get_cache().get_primitive();
       auto& src_zp_tensor = get_cache().get_src_zp_tensor();
-      if (with_bias) {
-        ideep::convolution_forward::compute(
-            conv_params, primitive, src, src_zp_tensor, weights, b, dst);
-      } else {
-        ideep::convolution_forward::compute(
-            conv_params, primitive, src, src_zp_tensor, weights, dst);
-      }
+      auto& bias_attr = get_cache().get_bias_attr();
+      ideep::convolution_forward::compute(
+          pd, primitive, src, src_zp_tensor, weights, b, with_bias, bias_attr, dst);
     } else {
-      // Cache miss. Go to normal path.
-      if (with_bias) {
-        ideep::convolution_forward::compute_v2(
-            src, weights, b, dst_dims, dst,
-            strides, dilates, padding_l, padding_r, groups(),
-            src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
-            op_attr, dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
-            ideep::u8s8, ideep::engine::cpu_engine());
-      } else {
-        ideep::convolution_forward::compute_v2(
-            src, weights, dst_dims, dst,
-            strides, dilates, padding_l, padding_r, groups(),
-            src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
-            op_attr, dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
-            ideep::u8s8, ideep::engine::cpu_engine());
-      }
+      ideep::convolution_forward::compute_v2(
+          src, weights, b, with_bias, dst_dims, dst,
+          strides, dilates, padding_l, padding_r, groups(),
+          src_scales, weights_scales, ideep::scale_t(scale_size, inv_output_scale),
+          src_zero_points, dst_zero_points, op_attr,
+          dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
+          ideep::u8s8, ideep::engine::cpu_engine());
     }
   }
   return output;

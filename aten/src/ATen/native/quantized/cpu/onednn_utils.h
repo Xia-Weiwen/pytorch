@@ -6,77 +6,89 @@
 #include <ATen/native/quantized/packed_params.h>
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
+#include <mutex>
 
-// Base class of primitive cache. Only support conv for now.
-struct PrimitiveCache {
-
-  bool is_valid = false;
+struct PrimitiveCacheKey {
   double input_scale;
   int64_t input_zero_point;
   std::vector<int64_t> input_shape;
   double output_scale;
   int64_t output_zero_point;
 
-  inline bool valid() {
-    return this->is_valid;
-  }
+  PrimitiveCacheKey() {}
 
-  bool hit(
-      double input_scale,
-      int64_t input_zero_point,
-      const std::vector<int64_t>& input_shape,
-      double output_scale,
-      int64_t output_zero_point) {
-    return valid() &&
-           this->input_scale == input_scale &&
-           this->input_zero_point == input_zero_point &&
-           this->input_shape == input_shape &&
-           this->output_scale == output_scale &&
-           this->output_zero_point == output_zero_point;
-  }
-};
-
-using Conv = dnnl::convolution_forward;
-using ConvParams = ideep::convolution_forward_params;
-struct ConvPrimitiveCache : PrimitiveCache {
-
-  ConvParams conv_params;
-  Conv primitive;
-  ideep::tensor input_zp_tensor;
-
-  inline void set(
-      double input_scale,
-      int64_t input_zero_point,
-      const std::vector<int64_t>& input_shape,
-      double output_scale,
-      int64_t output_zero_point,
-      ideep::convolution_forward_params conv_params) {
+  PrimitiveCacheKey(double input_scale,
+                    int64_t input_zero_point,
+                    const std::vector<int64_t>& input_shape,
+                    double output_scale,
+                    int64_t output_zero_point) {
     this->input_scale = input_scale;
     this->input_zero_point = input_zero_point;
     this->input_shape = input_shape;
     this->output_scale = output_scale;
     this->output_zero_point = output_zero_point;
-    this->conv_params = conv_params;
-    this->primitive = Conv(this->conv_params.pd);
+  }
+
+  bool operator == (const PrimitiveCacheKey& other) {
+    return this->input_scale == other.input_scale &&
+           this->input_zero_point == other.input_zero_point &&
+           this->input_shape == other.input_shape &&
+           this->output_scale == other.output_scale &&
+           this->output_zero_point == other.output_zero_point;
+  }
+};
+
+// Base class of primitive cache. Only support conv for now.
+struct PrimitiveCache {
+
+  PrimitiveCacheKey key;
+
+  bool hit(const PrimitiveCacheKey& key) {
+    return this->key == key;
+  }
+};
+
+using Conv = dnnl::convolution_forward;
+using ConvDesc = dnnl::convolution_forward::primitive_desc;
+using ConvParams = ideep::convolution_forward_params;
+
+struct ConvPrimitiveCache : PrimitiveCache {
+
+  ConvPrimitiveCache() {}
+
+  ConvPrimitiveCache(const PrimitiveCacheKey& key,
+                     const ConvDesc& conv_desc,
+                     const ideep::attr_t bias_attr) {
+    this->key = key;
+    this->primitive_desc = conv_desc;
+    this->primitive = Conv(this->primitive_desc);
+    this->bias_attr = bias_attr;
     // Construct tensor of input zero point
     ideep::tensor::desc input_zp_desc = {{1}, ideep::data_type::s32, {1}};
-    auto aengine = ideep::engine(this->conv_params.pd.get_engine().get_kind());
-    this->input_zp_tensor.init(input_zp_desc, aengine);
+    this->input_zp_tensor.init(input_zp_desc, ideep::engine::cpu_engine());
     auto zp_data_ptr = reinterpret_cast<int32_t *>(this->input_zp_tensor.get_data_handle());
-    zp_data_ptr[0] = this->input_zero_point;
-    this->is_valid = true;
+    zp_data_ptr[0] = this->key.input_zero_point;
   }
 
-  inline ConvParams& get_conv_params() {
-    return conv_params;
+  ConvDesc primitive_desc;
+  Conv primitive;
+  ideep::tensor input_zp_tensor;
+  ideep::attr_t bias_attr;
+
+  inline ConvDesc& get_primitive_desc() {
+    return primitive_desc;
   }
 
-  inline Conv& get_conv_primitive() {
+  inline Conv& get_primitive() {
     return primitive;
   }
 
   inline ideep::tensor& get_src_zp_tensor() {
     return input_zp_tensor;
+  }
+
+  inline ideep::attr_t& get_bias_attr() {
+    return bias_attr;
   }
 };
 
