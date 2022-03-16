@@ -7,6 +7,79 @@
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
 
+// Base class of primitive cache. Only support conv for now.
+struct PrimitiveCache {
+
+  bool is_valid = false;
+  double input_scale;
+  int64_t input_zero_point;
+  std::vector<int64_t> input_shape;
+  double output_scale;
+  int64_t output_zero_point;
+
+  inline bool valid() {
+    return this->is_valid;
+  }
+
+  bool hit(
+      double input_scale,
+      int64_t input_zero_point,
+      const std::vector<int64_t>& input_shape,
+      double output_scale,
+      int64_t output_zero_point) {
+    return valid() &&
+           this->input_scale == input_scale &&
+           this->input_zero_point == input_zero_point &&
+           this->input_shape == input_shape &&
+           this->output_scale == output_scale &&
+           this->output_zero_point == output_zero_point;
+  }
+};
+
+using Conv = dnnl::convolution_forward;
+using ConvParams = ideep::convolution_forward_params;
+struct ConvPrimitiveCache : PrimitiveCache {
+
+  ConvParams conv_params;
+  Conv primitive;
+  ideep::tensor input_zp_tensor;
+
+  inline void set(
+      double input_scale,
+      int64_t input_zero_point,
+      const std::vector<int64_t>& input_shape,
+      double output_scale,
+      int64_t output_zero_point,
+      ideep::convolution_forward_params conv_params) {
+    this->input_scale = input_scale;
+    this->input_zero_point = input_zero_point;
+    this->input_shape = input_shape;
+    this->output_scale = output_scale;
+    this->output_zero_point = output_zero_point;
+    this->conv_params = conv_params;
+    this->primitive = Conv(this->conv_params.pd);
+    // Construct tensor of input zero point
+    ideep::tensor::desc input_zp_desc = {{1}, ideep::data_type::s32, {1}};
+    auto aengine = ideep::engine(this->conv_params.pd.get_engine().get_kind());
+    this->input_zp_tensor.init(input_zp_desc, aengine);
+    auto zp_data_ptr = reinterpret_cast<int32_t *>(this->input_zp_tensor.get_data_handle());
+    zp_data_ptr[0] = this->input_zero_point;
+    this->is_valid = true;
+  }
+
+  inline ConvParams& get_conv_params() {
+    return conv_params;
+  }
+
+  inline Conv& get_conv_primitive() {
+    return primitive;
+  }
+
+  inline ideep::tensor& get_src_zp_tensor() {
+    return input_zp_tensor;
+  }
+};
+
 struct PackedLinearWeightsOnednn : public LinearPackedParamsBase {
   PackedLinearWeightsOnednn(
       std::unique_ptr<ideep::tensor> weight,
@@ -141,11 +214,18 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
   }
 
  private:
+  ConvPrimitiveCache conv_prim_cache;
+
   template <bool ReluFused>
   at::Tensor apply_impl(
       const at::Tensor& input,
       double output_scale,
       int64_t output_zero_point);
+
+  inline ConvPrimitiveCache& get_cache() {
+    assert(!transpose());
+    return conv_prim_cache;
+  }
 };
 
 #endif // #if AT_MKLDNN_ENABLED()
