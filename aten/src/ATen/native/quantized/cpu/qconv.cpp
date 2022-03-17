@@ -1282,8 +1282,7 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
     // Cache won't be updated once initialized.
     PrimitiveCacheKey cache_key(
         input_scale, input_zp, src_dims, output_scale, output_zero_point);
-    std::once_flag cache_initialized_flag;
-    std::call_once(cache_initialized_flag, [&](){
+    std::call_once(*cache_initialized_flag, [&](){
         ConvParams conv_params;
         ideep::convolution_forward::prepare(
             conv_params, src, weights, b, with_bias, dst_dims, dst,

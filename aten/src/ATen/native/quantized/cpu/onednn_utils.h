@@ -7,6 +7,7 @@
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
 #include <mutex>
+#include <memory>
 
 struct PrimitiveCacheKey {
   double input_scale;
@@ -162,7 +163,9 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
     output_padding_(std::move(output_padding)),
     dilation_(std::move(dilation)),
     groups_(groups),
-    transpose_(transpose) {}
+    transpose_(transpose) {
+    cache_initialized_flag = std::make_unique<std::once_flag>();
+  }
 
   std::unique_ptr<ideep::tensor> weight_;
   c10::optional<ideep::tensor> bias_;
@@ -227,6 +230,7 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
 
  private:
   ConvPrimitiveCache conv_prim_cache;
+  std::unique_ptr<std::once_flag> cache_initialized_flag;
 
   template <bool ReluFused>
   at::Tensor apply_impl(
