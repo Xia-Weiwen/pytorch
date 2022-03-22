@@ -1280,7 +1280,7 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   } else {
     // Cache is constructed when called for the first time.
     // Cache won't be updated once initialized.
-    PrimitiveCacheKey cache_key(
+    PrimitiveCacheKey cache_key = std::make_tuple(
         input_scale, input_zp, src_dims, output_scale, output_zero_point);
     std::call_once(*cache_initialized_flag, [&](){
         ConvParams conv_params;

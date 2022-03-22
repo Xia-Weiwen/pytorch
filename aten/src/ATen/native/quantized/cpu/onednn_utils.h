@@ -9,35 +9,8 @@
 #include <mutex>
 #include <memory>
 
-struct PrimitiveCacheKey {
-  double input_scale;
-  int64_t input_zero_point;
-  std::vector<int64_t> input_shape;
-  double output_scale;
-  int64_t output_zero_point;
-
-  PrimitiveCacheKey() {}
-
-  PrimitiveCacheKey(double input_scale,
-                    int64_t input_zero_point,
-                    const std::vector<int64_t>& input_shape,
-                    double output_scale,
-                    int64_t output_zero_point) {
-    this->input_scale = input_scale;
-    this->input_zero_point = input_zero_point;
-    this->input_shape = input_shape;
-    this->output_scale = output_scale;
-    this->output_zero_point = output_zero_point;
-  }
-
-  bool operator == (const PrimitiveCacheKey& other) {
-    return this->input_scale == other.input_scale &&
-           this->input_zero_point == other.input_zero_point &&
-           this->input_shape == other.input_shape &&
-           this->output_scale == other.output_scale &&
-           this->output_zero_point == other.output_zero_point;
-  }
-};
+// Cache Key: {input_scale, input_zero_point, input_shape, output_scale, output_zero_point}
+using PrimitiveCacheKey = std::tuple<double, int64_t, std::vector<int64_t>, double, int64_t>;
 
 // Base class of primitive cache. Only support conv for now.
 struct PrimitiveCache {
@@ -68,7 +41,7 @@ struct ConvPrimitiveCache : PrimitiveCache {
     ideep::tensor::desc input_zp_desc = {{1}, ideep::data_type::s32, {1}};
     this->input_zp_tensor.init(input_zp_desc, ideep::engine::cpu_engine());
     auto zp_data_ptr = reinterpret_cast<int32_t *>(this->input_zp_tensor.get_data_handle());
-    zp_data_ptr[0] = this->key.input_zero_point;
+    zp_data_ptr[0] = std::get<1>(key);
   }
 
   ConvDesc primitive_desc;
