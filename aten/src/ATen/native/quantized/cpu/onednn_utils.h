@@ -11,6 +11,13 @@
 
 // Cache Key: {input_scale, input_zero_point, input_shape, output_scale, output_zero_point}
 using PrimitiveCacheKey = std::tuple<double, int64_t, std::vector<int64_t>, double, int64_t>;
+enum CacheKeyIndex {
+  InputScale,
+  InputZeroPoint,
+  InputShape,
+  OutputScale,
+  OutputZeroPoint,
+};
 
 // Base class of primitive cache. Only support conv for now.
 struct PrimitiveCache {
@@ -41,7 +48,7 @@ struct ConvPrimitiveCache : PrimitiveCache {
     ideep::tensor::desc input_zp_desc = {{1}, ideep::data_type::s32, {1}};
     this->input_zp_tensor.init(input_zp_desc, ideep::engine::cpu_engine());
     auto zp_data_ptr = reinterpret_cast<int32_t *>(this->input_zp_tensor.get_data_handle());
-    zp_data_ptr[0] = std::get<1>(key);
+    zp_data_ptr[0] = std::get<InputZeroPoint>(key);
   }
 
   ConvDesc primitive_desc;
