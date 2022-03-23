@@ -9,14 +9,19 @@
 #include <mutex>
 #include <memory>
 
-// Cache Key: {input_scale, input_zero_point, input_shape, output_scale, output_zero_point}
-using PrimitiveCacheKey = std::tuple<double, int64_t, std::vector<int64_t>, double, int64_t>;
+using PrimitiveCacheKey = std::tuple<double,  // input_scale
+                                     int64_t,  // input_zero_point
+                                     std::vector<int64_t>,  // input_shape
+                                     double,  // output_scale
+                                     int64_t,  // output_zero_point
+                                     int64_t>;  // OMP_number_of_threads
 enum CacheKeyIndex {
   InputScale,
   InputZeroPoint,
   InputShape,
   OutputScale,
   OutputZeroPoint,
+  NumOfThreads,
 };
 
 // Base class of primitive cache. Only support conv for now.
@@ -29,9 +34,27 @@ struct PrimitiveCache {
   }
 };
 
+using LinearParams = ideep::matmul_forward_params;
 using Conv = dnnl::convolution_forward;
 using ConvDesc = dnnl::convolution_forward::primitive_desc;
 using ConvParams = ideep::convolution_forward_params;
+
+struct LinearPrimitiveCache : PrimitiveCache {
+
+  LinearPrimitiveCache() {}
+
+  LinearPrimitiveCache(const PrimitiveCacheKey& key,
+                       const LinearParams& param) {
+    this->key = key;
+    this->param = param;
+  }
+
+  LinearParams param;
+
+  inline LinearParams& get_param() {
+    return param;
+  }
+};
 
 struct ConvPrimitiveCache : PrimitiveCache {
 
@@ -39,22 +62,24 @@ struct ConvPrimitiveCache : PrimitiveCache {
 
   ConvPrimitiveCache(const PrimitiveCacheKey& key,
                      const ConvDesc& conv_desc,
+                     const ideep::tensor& bias,
                      const ideep::attr_t bias_attr) {
     this->key = key;
     this->primitive_desc = conv_desc;
     this->primitive = Conv(this->primitive_desc);
-    this->bias_attr = bias_attr;
     // Construct tensor of input zero point
     ideep::tensor::desc input_zp_desc = {{1}, ideep::data_type::s32, {1}};
     this->input_zp_tensor.init(input_zp_desc, ideep::engine::cpu_engine());
     auto zp_data_ptr = reinterpret_cast<int32_t *>(this->input_zp_tensor.get_data_handle());
     zp_data_ptr[0] = std::get<InputZeroPoint>(key);
+    // Construct expected bias
+    this->expected_bias = bias.reorder_if_differ_in(conv_desc.bias_desc(), bias_attr);
   }
 
   ConvDesc primitive_desc;
   Conv primitive;
   ideep::tensor input_zp_tensor;
-  ideep::attr_t bias_attr;
+  ideep::tensor expected_bias;
 
   inline ConvDesc& get_primitive_desc() {
     return primitive_desc;
@@ -68,8 +93,8 @@ struct ConvPrimitiveCache : PrimitiveCache {
     return input_zp_tensor;
   }
 
-  inline ideep::attr_t& get_bias_attr() {
-    return bias_attr;
+  inline ideep::tensor& get_bias() {
+    return expected_bias;
   }
 };
 
@@ -82,7 +107,9 @@ struct PackedLinearWeightsOnednn : public LinearPackedParamsBase {
       : weight_(std::move(weight)),
         bias_(std::move(bias)),
         orig_weight_(std::move(orig_weight)),
-        orig_bias_(std::move(orig_bias)) {}
+        orig_bias_(std::move(orig_bias)) {
+    cache_initialized_flag = std::make_unique<std::once_flag>();
+  }
   std::unique_ptr<ideep::tensor> weight_;
   c10::optional<ideep::tensor> bias_;
   at::Tensor orig_weight_;
@@ -111,6 +138,9 @@ struct PackedLinearWeightsOnednn : public LinearPackedParamsBase {
       c10::optional<at::Tensor> bias);
 
  private:
+  LinearPrimitiveCache prim_cache;
+  std::unique_ptr<std::once_flag> cache_initialized_flag;
+
   template <bool ReluFused>
   at::Tensor apply_impl(
       at::Tensor input,
@@ -119,6 +149,10 @@ struct PackedLinearWeightsOnednn : public LinearPackedParamsBase {
 
   template <bool ReluFused>
   at::Tensor apply_dynamic_impl(at::Tensor input, bool reduce_range=false);
+
+  inline LinearPrimitiveCache& get_cache() {
+    return prim_cache;
+  }
 };
 
 template <int kSpatialDim = 2>
@@ -209,7 +243,7 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
   }
 
  private:
-  ConvPrimitiveCache conv_prim_cache;
+  ConvPrimitiveCache prim_cache;
   std::unique_ptr<std::once_flag> cache_initialized_flag;
 
   template <bool ReluFused>
@@ -220,7 +254,7 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
 
   inline ConvPrimitiveCache& get_cache() {
     assert(!transpose());
-    return conv_prim_cache;
+    return prim_cache;
   }
 };
 

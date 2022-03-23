@@ -1280,8 +1280,9 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
   } else {
     // Cache is constructed when called for the first time.
     // Cache won't be updated once initialized.
+    int num_threads = at::get_num_threads();
     PrimitiveCacheKey cache_key = std::make_tuple(
-        input_scale, input_zp, src_dims, output_scale, output_zero_point);
+        input_scale, input_zp, src_dims, output_scale, output_zero_point, num_threads);
     std::call_once(*cache_initialized_flag, [&](){
         ConvParams conv_params;
         ideep::convolution_forward::prepare(
@@ -1291,16 +1292,16 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
             src_zero_points, dst_zero_points, op_attr,
             dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
             ideep::u8s8, ideep::engine::cpu_engine());
-        get_cache() = ConvPrimitiveCache(cache_key, conv_params.pd, conv_params.bias_attr);
+        get_cache() = ConvPrimitiveCache(cache_key, conv_params.pd, b, conv_params.bias_attr);
     });
     // If hit, use cached data. If miss, fall back to normal path.
     if (get_cache().hit(cache_key)) {
       ConvDesc& pd = get_cache().get_primitive_desc();
       Conv& primitive = get_cache().get_primitive();
       auto& src_zp_tensor = get_cache().get_src_zp_tensor();
-      auto& bias_attr = get_cache().get_bias_attr();
+      auto& expected_bias = get_cache().get_bias();
       ideep::convolution_forward::compute(
-          pd, primitive, src, src_zp_tensor, weights, b, with_bias, bias_attr, dst);
+          pd, primitive, src, src_zp_tensor, weights, expected_bias, with_bias, dst);
     } else {
       ideep::convolution_forward::compute_v2(
           src, weights, b, with_bias, dst_dims, dst,
