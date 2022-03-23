@@ -668,8 +668,8 @@ at::Tensor PackedLinearWeightsOnednn::apply_impl(
     }
   }
   const auto& b = with_bias ? bias_.value() : ideep::tensor();
-  // Cache is constructed when called for the first time.
-  // Cache won't be updated once initialized.
+  // Primitive cache is initialized when called for the first time
+  // and won't be updated afterwards.
   int num_threads = at::get_num_threads();
   PrimitiveCacheKey cache_key = std::make_tuple(
       input_scale, input_zero_point, input_dims, output_scale, output_zero_point, num_threads);

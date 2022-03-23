@@ -38,6 +38,9 @@ using LinearParams = ideep::matmul_forward_params;
 using Conv = dnnl::convolution_forward;
 using ConvDesc = dnnl::convolution_forward::primitive_desc;
 using ConvParams = ideep::convolution_forward_params;
+using Deconv = dnnl::deconvolution_forward;
+using DeconvDesc = dnnl::deconvolution_forward::primitive_desc;
+using DeconvParams = ideep::deconv_forward_params;
 
 struct LinearPrimitiveCache : PrimitiveCache {
 
@@ -86,6 +89,45 @@ struct ConvPrimitiveCache : PrimitiveCache {
   }
 
   inline Conv& get_primitive() {
+    return primitive;
+  }
+
+  inline ideep::tensor& get_src_zp_tensor() {
+    return input_zp_tensor;
+  }
+
+  inline ideep::tensor& get_bias() {
+    return expected_bias;
+  }
+};
+
+struct DeconvPrimitiveCache : PrimitiveCache {
+
+  DeconvPrimitiveCache() {}
+
+  DeconvPrimitiveCache(const PrimitiveCacheKey& key,
+                       const DeconvDesc& deconv_desc,
+                       const ideep::tensor& bias,
+                       const ideep::attr_t bias_attr,
+                       const ideep::tensor& input_zero_point) {
+    this->key = key;
+    this->primitive_desc = deconv_desc;
+    this->primitive = Deconv(this->primitive_desc);
+    this->input_zp_tensor = std::move(input_zero_point);
+    // Construct expected bias
+    this->expected_bias = bias.reorder_if_differ_in(deconv_desc.bias_desc(), bias_attr);
+  }
+
+  DeconvDesc primitive_desc;
+  Deconv primitive;
+  ideep::tensor input_zp_tensor;
+  ideep::tensor expected_bias;
+
+  inline DeconvDesc& get_primitive_desc() {
+    return primitive_desc;
+  }
+
+  inline Deconv& get_primitive() {
     return primitive;
   }
 
@@ -243,7 +285,8 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
   }
 
  private:
-  ConvPrimitiveCache prim_cache;
+  ConvPrimitiveCache conv_prim_cache;
+  DeconvPrimitiveCache deconv_prim_cache;
   std::unique_ptr<std::once_flag> cache_initialized_flag;
 
   template <bool ReluFused>
@@ -252,9 +295,14 @@ struct PackedConvWeightsOnednn : public ConvPackedParamsBase<kSpatialDim> {
       double output_scale,
       int64_t output_zero_point);
 
-  inline ConvPrimitiveCache& get_cache() {
+  inline ConvPrimitiveCache& get_conv_cache() {
     assert(!transpose());
-    return prim_cache;
+    return conv_prim_cache;
+  }
+
+  inline DeconvPrimitiveCache& get_deconv_cache() {
+    assert(transpose());
+    return deconv_prim_cache;
   }
 };
 
