@@ -545,7 +545,7 @@ at::Tensor PackedLinearWeightsOnednn::apply_dynamic_impl(
     LinearParams& linear_params = get_cache().get_param();
     ideep::matmul_forward::compute(linear_params, x, w, b, with_bias, y);
   } else {
-    ideep::matmul_forward::compute_v2(x, w, y, 1.0f, 1.0f,
+    ideep::matmul_forward::compute_v2(x, w, b, with_bias, y, 1.0f, 1.0f,
                                       src_scales, weights_scales, ideep::scale_t(),
                                       src_zero_point, ideep::zero_point_t(), op_attr);
   }
