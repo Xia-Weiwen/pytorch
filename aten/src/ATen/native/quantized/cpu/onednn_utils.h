@@ -54,6 +54,23 @@ struct LinearPrimitiveCache : PrimitiveCache {
 
   LinearParams param;
 
+  // For dynamic qlinear, batch size, scale and zero point
+  // are set at execution time. So we only need to compare
+  // the rest part of key.
+  bool hit_dynamic(const PrimitiveCacheKey& new_key) {
+    auto cached_input_shape = std::get<InputShape>(this->key);
+    auto new_input_shape = std::get<InputShape>(new_key);
+    if (cached_input_shape.size() != new_input_shape.size()) {
+      return false;
+    }
+    for (int i = 1; i < cached_input_shape.size(); ++i) {
+      if (cached_input_shape[i] != new_input_shape[i]) {
+        return false;
+      }
+    }
+    return (std::get<NumOfThreads>(this->key) == std::get<NumOfThreads>(new_key));
+  }
+
   inline LinearParams& get_param() {
     return param;
   }

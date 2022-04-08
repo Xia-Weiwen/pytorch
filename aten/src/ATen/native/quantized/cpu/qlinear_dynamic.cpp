@@ -491,9 +491,11 @@ at::Tensor PackedLinearWeightsOnednn::apply_dynamic_impl(
   x.init(input_desc, input_contig.data_ptr());
   // Find quantization parameters
   float x_max = 0, x_min = 0;
-  if (input.numel() > 0) {
-    x_min = input_contig.min().item<float>();
-    x_max = input_contig.max().item<float>();
+  if (input_contig.numel() > 0) {
+    Tensor t_min, t_max;
+    std::tie(t_min, t_max) = at::aminmax(input_contig);
+    x_max = t_max.item<float>();
+    x_min = t_min.item<float>();
   }
   const int precision = 8;
   auto q_params = quant_utils::ChooseQuantizationParams(
@@ -535,15 +537,16 @@ at::Tensor PackedLinearWeightsOnednn::apply_dynamic_impl(
       q_params.scale, q_params.zero_point, input_dims, 1.0, 0, num_threads);
   std::call_once(*cache_initialized_flag, [&](){
       LinearParams linear_params;
-      ideep::matmul_forward::prepare(
+      ideep::matmul_forward::prepare_dynamic(
           linear_params, x, w, b, with_bias, y, 1.0f, 1.0f,
           src_scales, weights_scales, ideep::scale_t(),
           src_zero_point, ideep::zero_point_t(), op_attr);
       get_cache() = LinearPrimitiveCache(cache_key, linear_params);
   });
-  if (get_cache().hit(cache_key)) {
+  if (get_cache().hit_dynamic(cache_key)) {
     LinearParams& linear_params = get_cache().get_param();
-    ideep::matmul_forward::compute(linear_params, x, w, b, with_bias, y);
+    ideep::matmul_forward::compute_dynamic(linear_params, x, w, b, with_bias, y, 1.0f, 1.0f,
+        src_scales, weights_scales, ideep::scale_t(), src_zero_point, ideep::zero_point_t());
   } else {
     ideep::matmul_forward::compute_v2(x, w, b, with_bias, y, 1.0f, 1.0f,
                                       src_scales, weights_scales, ideep::scale_t(),
