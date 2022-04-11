@@ -1280,7 +1280,10 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
             params, src, weights, b, with_bias, dst_dims, dst,
             strides, padding_l, padding_r, dilates, groups(),
             src_scales, weights_scales, ideep::scale_t(scale_size, inv_output_scale),
-            src_zero_points, dst_zero_points, op_attr);
+            src_zero_points, dst_zero_points, op_attr,
+            dnnl::algorithm::deconvolution_direct,
+            dnnl::prop_kind::forward_inference,
+            ideep::u8s8, ideep::engine::cpu_engine());
         get_deconv_cache() = DeconvPrimitiveCache(
             cache_key, params.pd, b, params.bias_attr, params.input_zero_point);
     });
@@ -1296,7 +1299,10 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
           strides, padding_l, padding_r, dilates,
           groups(), src_scales, weights_scales,
           ideep::scale_t(scale_size, inv_output_scale),
-          src_zero_points, dst_zero_points, op_attr);
+          src_zero_points, dst_zero_points, op_attr,
+          dnnl::algorithm::deconvolution_direct,
+          dnnl::prop_kind::forward_inference,
+          ideep::u8s8, ideep::engine::cpu_engine());
     }
   } else {  // not transposed
     PrimitiveCacheKey cache_key = std::make_tuple(
@@ -1307,7 +1313,10 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
             params, src, weights, b, with_bias, dst_dims, dst,
             strides, dilates, padding_l, padding_r, groups(),
             src_scales, weights_scales, ideep::scale_t(scale_size, inv_output_scale),
-            src_zero_points, dst_zero_points, op_attr);
+            src_zero_points, dst_zero_points, op_attr,
+            dnnl::algorithm::convolution_direct,
+            dnnl::prop_kind::forward_inference,
+            ideep::u8s8, ideep::engine::cpu_engine());
         get_conv_cache() = ConvPrimitiveCache(cache_key, params.pd, b, params.bias_attr);
     });
     // If hit, use cached data. If miss, fall back to normal path.
@@ -1323,7 +1332,10 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
           src, weights, b, with_bias, dst_dims, dst,
           strides, dilates, padding_l, padding_r, groups(),
           src_scales, weights_scales, ideep::scale_t(scale_size, inv_output_scale),
-          src_zero_points, dst_zero_points, op_attr);
+          src_zero_points, dst_zero_points, op_attr,
+          dnnl::algorithm::convolution_direct,
+          dnnl::prop_kind::forward_inference,
+          ideep::u8s8, ideep::engine::cpu_engine());
     }
   }
   return output;
