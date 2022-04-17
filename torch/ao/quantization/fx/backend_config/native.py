@@ -267,6 +267,49 @@ def _get_linear_configs():
         "root_module": torch.nn.Linear,
         "reference_quantized_module_for_root": nnqr.Linear,
     })
+
+    # (4) Linear + leaky_relu
+    # -------------------
+    # 4.1 linear module + leaky_relu fusion config
+    # linear leaky_relu, linear module + relu module
+    linear_configs.append({
+        "pattern": (torch.nn.LeakyReLU, torch.nn.Linear),
+        "dtype_configs": dtype_configs,
+        "fuser_method": reverse_sequential_wrapper2(nni.LinearLeakyReLU),
+        "fused_module": nni.LinearLeakyReLU,
+    })
+    # linear leaky_relu, linear module + functional leaky_relu
+    linear_configs.append({
+        "pattern": (torch.nn.functional.leaky_relu, torch.nn.Linear),
+        "dtype_configs": dtype_configs,
+        "fuser_method": reverse_sequential_wrapper2(nni.LinearLeakyReLU),
+        "fused_module": nni.LinearLeakyReLU,
+    })
+
+    # 4.2 linear module + leaky_relu, fused module configs
+    # linear leaky_relu, fused module
+    linear_configs.append({
+        "pattern": nni.LinearLeakyReLU,
+        "observation_type": observation_type,
+        "dtype_configs": dtype_configs,
+        "root_module": torch.nn.Linear,
+        "reference_quantized_module_for_root": nnqr.Linear,
+        # "qat_module": nniqat.LinearLeakyReLU,
+    })
+    # 4.3 functional linear + leaky_relu configs
+    # linear leaky_relu, functional linear + leaky_relu module
+    linear_configs.append({
+        "pattern": (torch.nn.LeakyReLU, F.linear),
+        "observation_type": observation_type,
+        "dtype_configs": dtype_configs,
+    })
+    # linear leaky_relu, functional linear + functional leaky_relu
+    linear_configs.append({
+        "pattern": (F.leaky_relu, F.linear),
+        "observation_type": observation_type,
+        "dtype_configs": dtype_configs,
+    })
+
     return linear_configs
 
 def _get_conv_configs():

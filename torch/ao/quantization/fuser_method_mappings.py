@@ -218,6 +218,7 @@ DEFAULT_PATTERN_TO_FUSER_METHOD: Dict[Pattern, Union[nn.Sequential, Callable]] =
     (nn.BatchNorm1d, nn.ConvTranspose1d): reverse2(fuse_convtranspose_bn),
     (nn.BatchNorm2d, nn.ConvTranspose2d): reverse2(fuse_convtranspose_bn),
     (nn.BatchNorm3d, nn.ConvTranspose3d): reverse2(fuse_convtranspose_bn),
+    (nn.LeakyReLU, nn.Linear): reverse_sequential_wrapper2(nni.LinearLeakyReLU),
 }
 
 def get_valid_patterns(op_pattern):

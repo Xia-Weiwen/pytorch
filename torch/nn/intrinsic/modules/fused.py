@@ -123,3 +123,12 @@ class LinearBn1d(_FusedModule):
         assert type_before_parametrizations(linear) == Linear and type_before_parametrizations(bn) == BatchNorm1d, \
             'Incorrect types for input modules{}{}'.format(type_before_parametrizations(linear), type_before_parametrizations(bn))
         super().__init__(linear, bn)
+
+class LinearLeakyReLU(_FusedModule):
+    r"""This is a sequential container which calls the Linear and LeakyReLU modules.
+    During quantization this will be replaced with the corresponding fused module."""
+    def __init__(self, linear, leaky_relu):
+        assert type(linear) == Linear and type(leaky_relu) == torch.nn.LeakyReLU, \
+            'Incorrect types for input modules{}{}'.format(
+                type(linear), type(leaky_relu))
+        super().__init__(linear, leaky_relu)
