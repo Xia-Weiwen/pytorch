@@ -36,6 +36,39 @@ std::tuple<Tensor, Tensor, Tensor> mkldnn_linear_backward(
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
 
+/* Weight Pack PoC start */
+#include <ATen/Parallel.h> // to use at::get_num_threads()
+
+// Define CacheKey as a tuple of (input shape, weight buffer addr, OMP number)
+using CacheKey = std::tuple<std::vector<int64_t>, void*, int>;
+static const int InputDimsIndex = 0;
+static const int WeightBufAddrIndex = 1;
+static const int OmpNumIndex = 2;
+
+// Define hasher of CacheKey
+namespace std {
+  template<>
+  struct hash<CacheKey> {
+    inline size_t operator()(const CacheKey& key) const {
+      std::vector<int64_t> input_dims = std::get<InputDimsIndex>(key);
+      void* w_buf_ptr = std::get<WeightBufAddrIndex>(key);
+      int omp_num = std::get<OmpNumIndex>(key);
+      std::string key_str = "[";
+      for (auto d : input_dims) {
+        key_str += std::to_string(d);
+        key_str += ",";
+      }
+      key_str += "],";
+      key_str += std::to_string(reinterpret_cast<int64_t>(w_buf_ptr));
+      key_str += ",";
+      key_str += std::to_string(omp_num);
+      std::hash<std::string> str_hasher;
+      return str_hasher(key_str);
+    }
+  };
+}
+/* Weight Pack PoC end */
+
 namespace at {
 namespace native {
 
@@ -67,12 +100,47 @@ Tensor mkldnn_linear(
   const Tensor weight = (weight_t.is_mkldnn() || weight_t.is_contiguous()) ? weight_t : weight_t.contiguous();
   const ideep::tensor w = itensor_from_tensor(weight);
 
+  /* Weight pack PoC start */
+  // Define the LRU cache for packed weight
+  static const ideep::utils::lru_cache<CacheKey, ideep::tensor>::size_type cache_capacity = 1024;
+  static ideep::utils::lru_cache<CacheKey, ideep::tensor> packed_weight_cache(cache_capacity);
+
+  // In some cases, weight does not have a storage (why?), cannot get data_ptr
+  bool weight_has_storage = weight_t.has_storage();
+  void* w_data_ptr = weight_has_storage ? weight_t.data_ptr() : nullptr;
+
+  // Create cache key
+  CacheKey cache_key = std::make_tuple(
+    x.get_dims(), w_data_ptr, at::get_num_threads()
+  );
+  // Look up in cache
+  auto pos = weight_has_storage ?
+      packed_weight_cache.find(cache_key) : packed_weight_cache.end();
+  bool cache_hit =  (pos != packed_weight_cache.end());
+  const ideep::tensor&& expected_w =
+      cache_hit ?
+          pos->second :
+          weight_has_storage ? 
+              [&](){
+                auto w_desc = ideep::inner_product_forward::expected_weights_desc(
+                  w.get_dims(), x.get_dims(), ideep::data_type::f32,
+                  ideep::data_type::f32, ideep::prop_kind::forward
+                );
+                return w.reorder_if_differ_in(w_desc);
+              }() :
+              w;
+  if (!cache_hit && weight_has_storage) {
+    packed_weight_cache.insert(std::make_pair(cache_key, expected_w));
+  }
+  // std::cout << "[info] MKLDNN Linear.cpp: Packed weight " << (found ? "" : "not") << " found!\n";
+  /* Weight pack PoC end */
+
   ideep::tensor y;
   if (bias.defined()) {
     const ideep::tensor b = itensor_from_tensor(bias);
-    ideep::inner_product_forward::compute(x, w, b, y);
+    ideep::inner_product_forward::compute(x, expected_w, b, y);
   } else {
-    ideep::inner_product_forward::compute(x, w, y);
+    ideep::inner_product_forward::compute(x, expected_w, y);
   }
 
   auto input_size = self.sizes();
