@@ -1911,6 +1911,7 @@ class TestQuantizeFx(QuantizationTestCase):
         self.checkGraphModuleNodes(m, expected_node_list=node_list)
 
 
+    @override_qengines
     def test_qconfig_dict_with_fused_modules(self):
         class LinearReLUModel(torch.nn.Module):
             def __init__(self, relu):
@@ -1950,7 +1951,8 @@ class TestQuantizeFx(QuantizationTestCase):
         for model in [LinearReLUModel, ConvReLUModel, ConvBnReLUModel]:
             for relu in [torch.nn.ReLU(), torch.nn.functional.relu, torch.relu]:
                 m = model(relu).eval()
-                qconfig_dict = torch.ao.quantization.get_default_qconfig_mapping("fbgemm")
+                qengine = torch.backends.quantized.engine
+                qconfig_dict = torch.ao.quantization.get_default_qconfig_mapping(qengine)
                 # should not crash as in https://github.com/pytorch/pytorch/issues/75825
                 prepare_fx(m, qconfig_dict, example_inputs=(torch.randn(1, 3, 3, 3),))
 
@@ -5795,6 +5797,10 @@ class TestQuantizeFx(QuantizationTestCase):
         """
         from torch.ao.quantization.backend_config import get_onednn_backend_config
         qconfig_mapping = get_default_qconfig_mapping('onednn')
+        # It's required that separate ops have the same qconfig in a fused op
+        qconfig = get_default_qconfig('onednn')
+        qconfig_mapping.set_object_type(torch.nn.Linear, qconfig)
+        qconfig_mapping.set_object_type(torch.nn.Tanh, qconfig)
         with override_quantized_engine('onednn'):
             m = LinearTanhModel()
             self._test_linear_activation_fusion_lowering_helper(
