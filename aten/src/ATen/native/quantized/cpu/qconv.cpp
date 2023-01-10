@@ -1279,7 +1279,8 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
             dnnl::prop_kind::forward_inference,
             ideep::u8s8, ideep::engine::cpu_engine());
         get_deconv_cache() = DeconvPrimitiveCache(cache_key, params, b);
-        weights = weights.reorder_if_differ_in(params.pd.weights_desc());
+        auto w_desc = ideep::tensor::desc(params.pd.weights_desc(), groups());
+        weights = weights.reorder_if_differ_in(w_desc);
     });
     if (get_deconv_cache().hit(cache_key)) {
       DeconvParams& params = get_deconv_cache().get_params();
@@ -1311,7 +1312,8 @@ at::Tensor PackedConvWeightsOnednn<kSpatialDim>::apply_impl(
             dnnl::prop_kind::forward_inference,
             ideep::u8s8, ideep::engine::cpu_engine());
         get_conv_cache() = ConvPrimitiveCache(cache_key, params, b);
-        weights = weights.reorder_if_differ_in(params.pd.weights_desc());
+        auto w_desc = ideep::tensor::desc(params.pd.weights_desc(), groups());
+        weights = weights.reorder_if_differ_in(w_desc);
     });
     // If hit, use cached data. If miss, fall back to normal path.
     if (get_conv_cache().hit(cache_key)) {
