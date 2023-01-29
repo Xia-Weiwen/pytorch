@@ -281,6 +281,7 @@ class TestQuantizePT2EModels(QuantizationTestCase):
             run = torch.compile(m, fullgraph=False)
 
             inductor_result = run(*example_inputs)
+            self.assertTrue(torch.allclose(before_fusion_result, inductor_result, rtol=5e-02, atol=5e-02))
 
             # FX quantization path
             m2 = copy.deepcopy(mod.eval())
