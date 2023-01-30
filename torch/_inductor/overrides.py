@@ -603,7 +603,30 @@ def fuse_quantization(gm: torch.fx.GraphModule):
     if not is_quantized_graph_module(gm):
         return gm
 
+    gm = quantize_weight_in_graph(gm)
+
     gm = fuse_reference_quantized_conv_relu(gm)
+
+    return gm
+
+def quantize_weight_in_graph(gm: torch.fx.GraphModule):
+    for node in gm.graph.nodes:
+        if node.target == torch.ops.aten.convolution.default:
+            dq_per_channel = node.args[1]
+            q_per_channel = dq_per_channel.args[0]
+            weight_node = q_per_channel.args[0]
+            quantize_args = \
+                (getattr(gm, n.target) if isinstance(n, torch.fx.Node) else n for n in q_per_channel.args)
+            weight_int8 = \
+                torch.ops.quantized_decomposed.quantize_per_channel(*quantize_args)
+            w_attr_name = weight_node.target
+            qw_attr_name = w_attr_name + '_quant'
+            setattr(gm, qw_attr_name, weight_int8)
+            weight_node.target = qw_attr_name
+            gm.graph.owning_module._buffers[qw_attr_name] = weight_int8
+            delattr(gm, w_attr_name)
+            q_per_channel.replace_all_uses_with(weight_node)
+            gm.graph.erase_node(q_per_channel)
 
     return gm
 
