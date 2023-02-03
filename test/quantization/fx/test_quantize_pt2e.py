@@ -304,10 +304,15 @@ class TestQuantizePT2EModels(QuantizationTestCase):
         For experiment.
         '''
         class Mod(torch.nn.Module):
-            def __init__(self, use_relu: bool) -> None:
+            def __init__(self, with_bias: bool, use_relu: bool) -> None:
                 super().__init__()
                 self.conv = torch.nn.Conv1d(
-                    in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1
+                    in_channels=3,
+                    out_channels=16,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=with_bias
                 )
                 self.relu = torch.nn.ReLU()
                 self.use_relu = use_relu
@@ -317,11 +322,11 @@ class TestQuantizePT2EModels(QuantizationTestCase):
                 return self.relu(x) if self.use_relu else x
 
         input_shape = (1, 3, 224)
-        for use_relu in [True, False]:
-            # Only support use_relu=True now
-            if use_relu == False:
-                continue
-            self._test_conv_inductor_backend_helper(Mod(use_relu), input_shape)
+        with_bias_list = [True, False]
+        use_relu_list = [True, False]
+        cases = itertools.product(with_bias_list, use_relu_list)
+        for with_bias, use_relu in cases:
+            self._test_conv_inductor_backend_helper(Mod(with_bias, use_relu), input_shape)
 
     def test_conv2d_inductor_backend(self):
         '''
@@ -329,10 +334,15 @@ class TestQuantizePT2EModels(QuantizationTestCase):
         For experiment.
         '''
         class Mod(torch.nn.Module):
-            def __init__(self, use_relu: bool) -> None:
+            def __init__(self, with_bias: bool, use_relu: bool) -> None:
                 super().__init__()
                 self.conv = torch.nn.Conv2d(
-                    in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1
+                    in_channels=3,
+                    out_channels=16,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=with_bias
                 )
                 self.relu = torch.nn.ReLU()
                 self.use_relu = use_relu
@@ -342,11 +352,11 @@ class TestQuantizePT2EModels(QuantizationTestCase):
                 return self.relu(x) if self.use_relu else x
 
         input_shape = (1, 3, 16, 16)
-        for use_relu in [True, False]:
-            # Only support use_relu=True now
-            if use_relu == False:
-                continue
-            self._test_conv_inductor_backend_helper(Mod(use_relu), input_shape)
+        with_bias_list = [True, False]
+        use_relu_list = [True, False]
+        cases = itertools.product(with_bias_list, use_relu_list)
+        for with_bias, use_relu in cases:
+            self._test_conv_inductor_backend_helper(Mod(with_bias, use_relu), input_shape)
 
     def test_conv3d_inductor_backend(self):
         '''
@@ -354,10 +364,15 @@ class TestQuantizePT2EModels(QuantizationTestCase):
         For experiment.
         '''
         class Mod(torch.nn.Module):
-            def __init__(self, use_relu: bool) -> None:
+            def __init__(self, with_bias: bool, use_relu: bool) -> None:
                 super().__init__()
                 self.conv = torch.nn.Conv3d(
-                    in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1
+                    in_channels=3,
+                    out_channels=16,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=with_bias
                 )
                 self.relu = torch.nn.ReLU()
                 self.use_relu = use_relu
@@ -367,11 +382,11 @@ class TestQuantizePT2EModels(QuantizationTestCase):
                 return self.relu(x) if self.use_relu else x
 
         input_shape = (1, 3, 6, 6, 6)
-        for use_relu in [True, False]:
-            # Only support use_relu=True now
-            if use_relu == False:
-                continue
-            self._test_conv_inductor_backend_helper(Mod(use_relu), input_shape)
+        with_bias_list = [True, False]
+        use_relu_list = [True, False]
+        cases = itertools.product(with_bias_list, use_relu_list)
+        for with_bias, use_relu in cases:
+            self._test_conv_inductor_backend_helper(Mod(with_bias, use_relu), input_shape)
 
     @skipIfNoONEDNN
     def test_int8_conv_with_cpu_tensors(self):
