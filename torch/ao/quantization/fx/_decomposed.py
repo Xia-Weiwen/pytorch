@@ -190,12 +190,29 @@ def conv_relu_inductor(qx, x_scale, x_zp, qw, w_scale, w_zp, w_axis,
     )
     return qy
 
+@impl(quantized_decomposed_lib, "conv_relu_inductor.tensor", "MkldnnCPU")
+def conv_relu_inductor_mkldnn_tensor(qx, x_scale, x_zp, qw, w_scale, w_zp, w_axis, 
+                         bias, stride, padding, dilation, groups, output_scale, output_zero_point):
+    quantized = torch.ops.quantized
+
+    qy = quantized.conv_relu_int8_packed_weight(
+        qx, x_scale, x_zp, qw, w_scale, w_zp, bias,
+        stride, padding, dilation, groups, output_scale, output_zero_point
+    )
+    return qy
+
 @impl(quantized_decomposed_lib, "conv_relu_inductor.tensor", "Meta")
 def conv_relu_inductor(qx, x_scale, x_zp, qw, w_scale, w_zp, w_axis, bias,
                          stride, padding, dilation, groups, output_scale, output_zero_point):
+    if len(qx.shape) == 3 and len(qw.shape) == 4:
+        # For conv1d, x and w should both have rank 3
+        # But if weight is prepacked, it's rank is 4 by unsqueeze(2)
+        qw_squeezed = torch.squeeze(qw, 2)
+    else:
+        qw_squeezed = qw
     shape_out = calc_conv_nd_return_shape(
         qx,
-        qw,
+        qw_squeezed,
         stride,
         padding,
         dilation,
