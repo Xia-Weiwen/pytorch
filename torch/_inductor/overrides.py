@@ -600,9 +600,8 @@ def fuse_quantization(gm: torch.fx.GraphModule, example_inputs):
         return gm
 
     gm = prepare_dequant_for_fusion(gm)
+    # Fuse `q - weight` and replace the original fp32 weight with quantized one
     pre_quantize_weights(gm)
-    gm = fuse_reference_quantized_conv(gm)
-    gm = fuse_reference_quantized_linear(gm)
 
     # To store input shapes on the graph
     # Get shape by node.meta.get("tensor_meta").shape
@@ -610,6 +609,12 @@ def fuse_quantization(gm: torch.fx.GraphModule, example_inputs):
     fake_mode = fake_mode_from_tensors(example_inputs)
     ShapeProp(gm, fake_mode=fake_mode).propagate(*example_inputs)
 
+    # Fuse `dq - op (- post ops) - q` to quantized op
+    gm = fuse_reference_quantized_conv(gm)
+    gm = fuse_reference_quantized_linear(gm)
+
+    # Reorder quantized weight to desired format for oneDNN kernel
+    # After that, weight is a MKLDNN tensor and it replaces the original one in graph
     gm = prepack_weight_in_graph(gm)
 
     return gm
@@ -668,9 +673,9 @@ def _insert_packed_weight_bias(
         packed_bias: torch.Tensor):
     w_attr_name = weight_node.target
     w_packed_attr_name = w_attr_name + '_packed'
-    setattr(gm, w_packed_attr_name, packed_weight)
-    weight_node.target = w_packed_attr_name
     gm.graph.owning_module._buffers[w_packed_attr_name] = packed_weight
+    setattr(gm, w_packed_attr_name, gm.graph.owning_module._buffers[w_packed_attr_name])
+    weight_node.target = w_packed_attr_name
     delattr(gm, w_attr_name)
     # q_per_channel_node.replace_all_uses_with(weight_node)
     # gm.graph.erase_node(q_per_channel_node)
@@ -678,9 +683,9 @@ def _insert_packed_weight_bias(
     if bias_node is not None:
         b_attr_name = bias_node.target
         b_pack_attr_name = b_attr_name + '_packed'
-        setattr(gm, b_pack_attr_name, packed_bias)
-        bias_node.target = b_pack_attr_name
         gm.graph.owning_module._buffers[b_pack_attr_name] = packed_bias
+        setattr(gm, b_pack_attr_name, gm.graph.owning_module._buffers[b_pack_attr_name])
+        bias_node.target = b_pack_attr_name
         delattr(gm, b_attr_name)
 
 def _prepack_conv_weight(gm: torch.fx.GraphModule):
