@@ -4405,7 +4405,7 @@ class TestQuantizedLinear(TestCase):
         qlinear_op,
         post_op="none",
         unary_post_op_args=(),
-        post_op_algorithms=("none"),
+        post_op_algorithms=("none",),
     ):
         qlinear_prepack = torch.ops.onednn.qlinear_prepack
         linear_op = F.linear

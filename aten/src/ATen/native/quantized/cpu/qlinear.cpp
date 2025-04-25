@@ -997,11 +997,10 @@ static at::Tensor linear_int8_with_onednn_weight(
   auto output_size = input.sizes().vec();
   output_size[dim - 1] = N;
 
-  std::optional<ideep::tensor> onednn_bias{std::nullopt};
   bool with_bias = bias.has_value();
-  at::Tensor bias_val_float;
+  tensor onednn_bias;
   if (with_bias) {
-    bias_val_float = bias.value().to(at::kFloat);
+    auto bias_val_float = bias.value();
     if (bias_val_float.dim() == 1) {
       auto b_reshape = bias_val_float.reshape({1, bias_val_float.size(0)});
       onednn_bias = at::native::itensor_view_from_dense(b_reshape);
@@ -1035,7 +1034,7 @@ static at::Tensor linear_int8_with_onednn_weight(
   auto dst_dtype = dst.get_data_type();
   auto dst_desc = tensor::desc(dst_dims, dst_dtype, ideep::format_tag::any);
   auto bias_desc = with_bias ?
-      tensor::desc(onednn_bias.value().get_dims(), ideep::data_type::f32, ideep::format_tag::any) :
+      tensor::desc(onednn_bias.get_dims(), ideep::data_type::f32, ideep::format_tag::any) :
       empty_tensor_desc;
   // Get op attr for primitive
   // Note: output_scale & output_zero_point are for re-quantization of the final output.
@@ -1066,23 +1065,40 @@ static at::Tensor linear_int8_with_onednn_weight(
   }
   op_attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
   auto engine = ideep::engine::cpu_engine();
-  auto primitive_desc = with_bias ?
+
+  using PD_CACHE = ideep::utils::computation_cache<dnnl::matmul::primitive_desc>;
+  auto pd_key = ideep::utils::create_key(
+      src_desc,
+      weights_desc,
+      bias_desc,
+      dst_desc,
+      op_attr,
+      with_bias,
+      weight_scales.numel(),
+      omp_get_max_threads());
+  auto primitive_desc = PD_CACHE::fetch_or_create(pd_key, [&]() {
+    return with_bias ?
       dnnl::matmul::primitive_desc(engine, src_desc, weights_desc, bias_desc, dst_desc, op_attr) :
       dnnl::matmul::primitive_desc(engine, src_desc, weights_desc, dst_desc, op_attr);
+  });
   auto primitive = dnnl::matmul(primitive_desc);
 
   // Reorder weight if needed
   auto expected_weight = packed_weight.reorder_if_differ_in(primitive_desc.weights_desc());
 
   // Prepare args and execute primitive
-  tensor scratchpad(primitive_desc.scratchpad_desc());
+  using SP_CACHE = ideep::utils::computation_cache<tensor>;
+  auto sp_key = ideep::utils::create_key(ideep::tensor::desc(primitive_desc.scratchpad_desc()));
+  tensor scratchpad = SP_CACHE::fetch_or_create(sp_key, [&]() {
+    return tensor(primitive_desc.scratchpad_desc());
+  });
   ideep::exec_args args;
   args.insert({DNNL_ARG_SRC, src});
   args.insert({DNNL_ARG_WEIGHTS, expected_weight});
   args.insert({DNNL_ARG_DST, dst});
   args.insert({DNNL_ARG_SCRATCHPAD, scratchpad});
   if (with_bias) {
-    args.insert({DNNL_ARG_BIAS, onednn_bias.value()});
+    args.insert({DNNL_ARG_BIAS, onednn_bias});
   }
   tensor src_scales_t = tensor(ideep::scale_t(1, input_scale));
   tensor wei_scales_t = at::native::itensor_from_tensor(weight_scales);
