@@ -519,6 +519,9 @@ at::Tensor _qconv_prepack_onednn(
       dilation.size() == (decltype(dilation.size()))kSpatialDim,
       "dilation should contain ", kSpatialDim, " elements for ",
       kSpatialDim, "D convolution.");
+  TORCH_CHECK(
+      weight.scalar_type() == at::kChar || weight.scalar_type() == at::kFloat8_e4m3fn,
+      "Weight should have dtype int8 or fp8 but got ", weight.scalar_type());
 
   bool is_1d = (1 == kSpatialDim);
   auto x_dims = input_shape.has_value()?input_shape.value().vec():ideep::dims();
@@ -569,11 +572,13 @@ at::Tensor _qconv_prepack_onednn(
     }
   }
 
-  if (input_scale != 1.0f) {
-    op_attr.set_scales_mask(DNNL_ARG_SRC, /* src_scales_mask= */0);
-  }
-  if (input_zero_point != 0) {
-    op_attr.set_zero_points_mask(DNNL_ARG_SRC, /* src_zero_points_mask= */0);
+  if (weight.scalar_type() == at::kChar) {
+    if (input_scale != 1.0f) {
+      op_attr.set_scales_mask(DNNL_ARG_SRC, /* src_scales_mask= */0);
+    }
+    if (input_zero_point != 0) {
+      op_attr.set_zero_points_mask(DNNL_ARG_SRC, /* src_zero_points_mask= */0);
+    }
   }
 
   at::Tensor weight_copy;
@@ -581,11 +586,15 @@ at::Tensor _qconv_prepack_onednn(
   ideep::dims dims_iohw, dims_giohw;
   ideep::tag w_tag = ideep::tag::any;
   const bool with_groups = groups > 1;
+  auto w_dnnl_dtype = weight.scalar_type() == at::kChar ? dnnl::memory::data_type::s8
+                                                        : dnnl::memory::data_type::f8_e4m3;
+  auto x_dnnl_dtype = weight.scalar_type() == at::kChar ? dnnl::memory::data_type::u8
+                                                        : dnnl::memory::data_type::f8_e4m3;
   w_desc = ideep::convolution_forward::expected_weights_desc(
-      w_dims, dnnl::memory::data_type::s8,
+      w_dims, w_dnnl_dtype,
       strides, padding_l, padding_r, dilates, groups,
       dnnl::algorithm::convolution_direct, dnnl::prop_kind::forward_inference,
-      dnnl::memory::data_type::u8, x_dims, op_attr, /*is_channels_last=*/true);
+      x_dnnl_dtype, x_dims, op_attr, /*is_channels_last=*/true);
 
   // Note: Weight in Conv1D will unsqueeze into Conv2D in previous step
   weight_copy = weight.clone(c10::MemoryFormat::Contiguous);
@@ -598,7 +607,7 @@ at::Tensor _qconv_prepack_onednn(
   ideep::dims wei_dims = with_groups ? ideep::utils::group_dims(w_desc.get_dims(), groups)
                                   : w_desc.get_dims();
   ideep::tensor wgt = ideep::tensor(
-      ideep::tensor::desc({wei_dims, dnnl::memory::data_type::s8, w_tag}, groups),
+      ideep::tensor::desc({wei_dims, w_dnnl_dtype, w_tag}, groups),
       weight_copy.data_ptr());
 
   wgt.set_scale(weights_scales); // Scales are needed for feed_from().

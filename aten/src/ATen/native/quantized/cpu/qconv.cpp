@@ -1408,6 +1408,7 @@ static at::Tensor _quantized_convolution_onednn(
     std::optional<std::string_view> unary_attr,
     torch::List<std::optional<at::Scalar>> unary_scalars,
     std::optional<std::string_view> unary_algorithm) {
+  using ideep::tensor;
   /*********************************/
   /*          Checks               */
   /*********************************/
@@ -1481,12 +1482,13 @@ static at::Tensor _quantized_convolution_onednn(
     padding = quant_utils::MakeArgForConv1d(padding, 0);
     dilation = quant_utils::MakeArgForConv1d(dilation, 1);
   }
+  auto act_dtype = act.scalar_type();
   TORCH_CHECK(
-    act.scalar_type() == c10::ScalarType::Byte,
-    func_name, ": Input tensor should have uint8 (unsigned char) data type");
+    act_dtype == c10::ScalarType::Byte || act_dtype == c10::ScalarType::Float8_e4m3fn,
+    func_name, ": Input tensor should have uint8 (unsigned char) or fp8 data type");
   TORCH_CHECK(
-    weight.scalar_type() == c10::ScalarType::Char,
-    func_name, ": Weight tensor should have int8 (char) data type");
+    weight.scalar_type() == c10::ScalarType::Char || weight.scalar_type() == c10::ScalarType::Float8_e4m3fn,
+    func_name, ": Weight tensor should have int8 (char) or fp8 data type");
   TORCH_CHECK(
     weight.ndimension() == kSpatialDim + 2,
     func_name, ": Weights are expected to have ", kSpatialDim + 2, " dimensions");
@@ -1502,6 +1504,13 @@ static at::Tensor _quantized_convolution_onednn(
     dilation.size() == (decltype(dilation.size()))kSpatialDim,
     func_name, ": dilation should contain ", kSpatialDim, " elements for ",
     kSpatialDim, "D convolution.");
+  bool is_fp8 = weight.scalar_type() == c10::ScalarType::Float8_e4m3fn;
+  if (is_fp8) {
+    TORCH_CHECK(act_zero_point == 0,
+      func_name, ": fp8 input should not have zero point.");
+    TORCH_CHECK(fp32_output || bfloat16_output,
+      func_name, ": fp8 convolution should have fp32 or bf16 output.");
+  }
 
   // Parameters
 #if IDEEP_PREREQ(3, 1, 0, 1)
@@ -1577,7 +1586,7 @@ static at::Tensor _quantized_convolution_onednn(
                                    c10::MemoryFormat::ChannelsLast :
                                    c10::MemoryFormat::ChannelsLast3d);
   auto src_dims = act_contig.sizes().vec();
-  auto src_data_type = dnnl::memory::data_type::u8;
+  auto src_data_type = is_fp8? dnnl::memory::data_type::f8_e4m3 : dnnl::memory::data_type::u8;
   auto src_desc = ideep::tensor::desc(src_dims, src_data_type,
       kSpatialDim == 2 ? ideep::format_tag::nhwc : ideep::format_tag::ndhwc);
   ideep::tensor src;
@@ -1594,7 +1603,7 @@ static at::Tensor _quantized_convolution_onednn(
     at::empty(
       dst_dims,
       at::device(c10::kCPU)
-          .dtype(fp32_output ? c10::kFloat : (bfloat16_output ? c10::kBFloat16 : c10::kByte))
+          .dtype(fp32_output ? c10::kFloat : (bfloat16_output ? c10::kBFloat16 : act_dtype))
           .memory_format(kSpatialDim == 2 ?
               c10::MemoryFormat::ChannelsLast :
               c10::MemoryFormat::ChannelsLast3d)
@@ -1604,6 +1613,7 @@ static at::Tensor _quantized_convolution_onednn(
   }
   ideep::tensor dst = at::native::itensor_view_from_dense(output);
   static ideep::tensor::desc dummy_accum_desc;
+  tensor wei_scales_t = tensor(weights_scales);
   ideep::attr_t op_attr = onednn_utils::create_attr_by_post_op(
     binary_attr.has_value() ? binary_attr.value() : "none",
     binary_alpha.has_value() ? binary_alpha.value().to<double>() : 1.0,
@@ -1612,16 +1622,17 @@ static at::Tensor _quantized_convolution_onednn(
     dummy_accum_desc,
     unary_attr.has_value() ? unary_attr.value() : "none",
     unary_scalars,
-    unary_algorithm.has_value() ? unary_algorithm.value() : ""
+    unary_algorithm.has_value() ? unary_algorithm.value() : "",
+    is_fp8 ? act_scale : 1.0f,
+    is_fp8 ? wei_scales_t : ideep::tensor()
   );
 
 #if IDEEP_PREREQ(3, 1, 0, 0)
   // Use oneDNN's APIs instead of prepare/compute from ideep to reduce integration overhead.
   // The functions from ideep are heavy because they have complex data structures for unified API
   // oneDNN version >= 3.1.0 is required.
-  using ideep::tensor;
   auto weight_grouped = packed_weight.make_grouped_weights(groups, /* is_deconv */false);
-  auto weights_desc = tensor::desc(weight_grouped.get_dims(), ideep::data_type::s8, ideep::format_tag::any);
+  auto weights_desc = tensor::desc(weight_grouped.get_dims(), packed_weight.get_data_type(), ideep::format_tag::any);
   if (groups > 1) {
     weights_desc = weights_desc.to_grouped(groups);
   }
@@ -1629,15 +1640,17 @@ static at::Tensor _quantized_convolution_onednn(
   auto bias_desc = with_bias ?
       tensor::desc(expected_bias.get_dims(), ideep::data_type::f32, ideep::format_tag::any) :
       tensor::desc();
-  if (act_scale != 1.0f) {
+  if (act_scale != 1.0f && !is_fp8) {
     op_attr.set_scales_mask(DNNL_ARG_SRC, 0);
   }
   if (act_zero_point != 0) {
     op_attr.set_zero_points_mask(DNNL_ARG_SRC, 0);
   }
-  int oc_per_group = weight_grouped.get_dim(0) / groups;
-  int wei_scale_mask = ideep::utils::conv_weight_scale_mask(weight_scales.numel(), oc_per_group, groups, false);
-  op_attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_scale_mask);
+  if (!is_fp8) {
+    int oc_per_group = weight_grouped.get_dim(0) / groups;
+    int wei_scale_mask = ideep::utils::conv_weight_scale_mask(weight_scales.numel(), oc_per_group, groups, false);
+    op_attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_scale_mask);
+  }
   if (output_scale != 1.0f) {
     op_attr.set_scales_mask(DNNL_ARG_DST, 0);
   }
@@ -1674,25 +1687,34 @@ static at::Tensor _quantized_convolution_onednn(
     args.insert({DNNL_ARG_BIAS, expected_bias});
   }
   tensor src_scales_t = tensor(ideep::scale_t(1, act_scale));
-  tensor wei_scales_t = tensor(weights_scales);
   tensor dst_scales_t = tensor(ideep::scale_t(1, output_scale));
   tensor src_zp_t = tensor(ideep::zero_point_t(1, act_zero_point));
   tensor dst_zp_t = tensor(ideep::zero_point_t(1, output_zero_point));
-  if (act_scale != 1.0f) {
+  if (act_scale != 1.0f && !is_fp8) {
     args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scales_t});
   }
   if (output_scale != 1.0f) {
     args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scales_t});
   }
-  args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_t});
+  if (!is_fp8) {
+    args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_t});
+  } else {
+    args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, wei_scales_t});
+  }
   if (act_zero_point != 0) {
     args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_t});
   }
   if (output_zero_point != 0) {
     args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_t});
   }
+  std::cout << "args.size = " << args.size() << ", keys =";
+  for (const auto& arg : args) {
+    std::cout << " " << (int)(arg.first);
+  }
+  std::cout << std::endl;
   primitive.execute(ideep::stream::default_stream(), args);
 #else
+  TORCH_CHECK(act_dtype == at::kByte, " (ONEDNN): Only support uint8 input for quantized conv with ONEDNN.");
   // Scales of ONEDNN and PyTorch are reciprocal
   const ideep::scale_t& src_scales = ideep::scale_t(1, 1.0 / act_scale);
 

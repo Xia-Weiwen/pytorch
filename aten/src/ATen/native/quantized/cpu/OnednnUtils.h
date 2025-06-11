@@ -319,19 +319,33 @@ inline ideep::attr_t create_attr_by_post_op(
     const ideep::tensor::desc& input1_desc,
     const std::string_view& unary_post_op,
     const torch::List<std::optional<at::Scalar>>& unary_post_op_args,
-    const std::string_view& unary_post_op_algorithm) {
-  using ideep::tensor;
+    const std::string_view& unary_post_op_algorithm,
+    const double input_scale = 1.0,
+    const ideep::tensor& weight_scales = ideep::tensor()) {
+  dnnl::post_ops po;
+  if (input_scale != 1.0) {
+    po.append_eltwise(
+        ideep::algorithm::eltwise_linear, input_scale, 0.f);
+  }
+  if (!weight_scales.is_empty()) {
+    std::cout << "[info] append binary mul\n";
+    po.append_binary(
+        ideep::algorithm::binary_mul, weight_scales.get_desc());
+  }
   if (binary_post_op == "none") {
     if (unary_post_op == "relu") {
-      return ideep::attr_t::fuse_relu();
+      // return ideep::attr_t::fuse_relu();
+      po.append_eltwise(dnnl::algorithm::eltwise_relu, 0.f, 0.f);
     } else if (unary_post_op == "leaky_relu") {
       TORCH_CHECK(
           unary_post_op_args.size() == 1,
           "onednn qlinear: expect one argument for post op leaky_relu but got ", unary_post_op_args.size(), " args");
       auto alpha = unary_post_op_args[0].value().to<float>();
-      return ideep::attr_t::fuse_relu_v2(alpha);
+      // return ideep::attr_t::fuse_relu_v2(alpha);
+      po.append_eltwise(dnnl::algorithm::eltwise_relu, alpha, 0.f);
     } else if (unary_post_op == "tanh") {
-      return ideep::attr_t::fuse_tanh();
+      // return ideep::attr_t::fuse_tanh();
+      po.append_eltwise(dnnl::algorithm::eltwise_tanh, 0.f, 0.f);
     } else if (unary_post_op == "gelu") {
       TORCH_CHECK(
           unary_post_op_algorithm == "none" || unary_post_op_algorithm == "tanh",
@@ -339,7 +353,8 @@ inline ideep::attr_t create_attr_by_post_op(
       auto post_algorithm = unary_post_op_algorithm == "none" ?
         dnnl::algorithm::eltwise_gelu_erf :
         dnnl::algorithm::eltwise_gelu_tanh;
-      return ideep::attr_t::fuse_gelu_v2(0.f, 0.f, post_algorithm);
+      // return ideep::attr_t::fuse_gelu_v2(0.f, 0.f, post_algorithm);
+      po.append_eltwise(post_algorithm, 0.f, 0.f);
     } else if (unary_post_op == "hardtanh") {
       TORCH_CHECK(
           unary_post_op_args.size() == 2 &&
@@ -350,11 +365,14 @@ inline ideep::attr_t create_attr_by_post_op(
           unary_post_op_args[0].value().to<float>();
       auto upper_bound_value =
           unary_post_op_args[1].value().to<float>();
-      return ideep::attr_t::fuse_clamp(lower_bound_value, upper_bound_value);
+      // return ideep::attr_t::fuse_clamp(lower_bound_value, upper_bound_value);
+      po.append_eltwise(dnnl::algorithm::eltwise_clip, lower_bound_value, upper_bound_value);
     } else if (unary_post_op == "hardswish") {
-      return ideep::attr_t::fuse_hardswish();
+      // return ideep::attr_t::fuse_hardswish();
+      po.append_eltwise(dnnl::algorithm::eltwise_hardswish, 1.0f / 6.0f, 0.5f);
     } else if (unary_post_op == "swish") {
-      return ideep::attr_t::fuse_swish();
+      // return ideep::attr_t::fuse_swish();
+      po.append_eltwise(dnnl::algorithm::eltwise_swish, 1.0f, 0.f);
     } else {
       TORCH_CHECK(
           unary_post_op == "none",
@@ -362,9 +380,12 @@ inline ideep::attr_t create_attr_by_post_op(
     }
   } else if (binary_post_op == "sum") {
     if (unary_post_op == "none") {
-      return ideep::attr_t::fuse_sum(input1_scale, input1_zero_point);
+      // return ideep::attr_t::fuse_sum(input1_scale, input1_zero_point);
+      po.append_sum(input1_scale, input1_zero_point);
     } else if (unary_post_op == "relu") {
-      return ideep::attr_t::residual_with_sum_zero_point(input1_scale, input1_zero_point);
+      // return ideep::attr_t::residual_with_sum_zero_point(input1_scale, input1_zero_point);
+      po.append_sum(input1_scale, input1_zero_point);
+      po.append_eltwise(dnnl::algorithm::eltwise_relu, 0.f, 0.f);
     } else {
       TORCH_CHECK(
           false,
@@ -372,12 +393,13 @@ inline ideep::attr_t create_attr_by_post_op(
     }
   } else if (binary_post_op == "add") {
     if (unary_post_op == "none") {
-      return ideep::attr_t::fuse_binary(ideep::algorithm::binary_add, input1_desc);
+      // return ideep::attr_t::fuse_binary(ideep::algorithm::binary_add, input1_desc);
+      po.append_binary(dnnl::algorithm::binary_add, input1_desc);
     } else if (unary_post_op == "relu") {
       ideep::post_ops po;
       po.append_binary(ideep::algorithm::binary_add, input1_desc);
-      po.append_eltwise(ideep::algorithm::eltwise_relu, 0, 0);
-      return ideep::attr_t::attr_post_ops(po);
+      po.append_eltwise(ideep::algorithm::eltwise_relu, 0.f, 0.f);
+      // return ideep::attr_t::attr_post_ops(po);
     } else {
       TORCH_CHECK(
           false,
@@ -388,7 +410,9 @@ inline ideep::attr_t create_attr_by_post_op(
         false,
         "onednn qlinear: unsupported binary post op ", binary_post_op);
   }
-  return ideep::attr_t();
+  ideep::attr_t op_attr;
+  op_attr.set_post_ops(po);
+  return op_attr;
 }
 
 // ONEDNN requires symmetric quantization of weight
