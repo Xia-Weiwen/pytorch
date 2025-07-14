@@ -297,7 +297,7 @@ TORCH_API void brgemm(
     float* C,
     bool is_vnni = true);
 
-#define CPUBLAS_BRGEMM_F8F8BF16
+#define CPUBLAS_BRGEMM_F8F8F32
 
 // Release brgemm hardware context
 TORCH_API void brgemm_release(bool is_vnni = true);
