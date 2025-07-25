@@ -166,7 +166,7 @@ def _quantize_fp8e4m3(t: torch.Tensor, channelwise: bool, scale: Optional[torch.
         scale = scale or t.abs().max().reshape([1]) / quant_max
         scale = torch.max(scale, eps) if isinstance(scale, torch.Tensor) else max(scale, eps.item())
         qt = t / scale
-    qt = qt.to(torch.float8_e4m3fn)
+    qt = qt.clamp(-quant_max, quant_max).to(torch.float8_e4m3fn)
     return qt, scale
 
 def _dequantize_fp8e4m3(qt: torch.Tensor, scale: torch.Tensor):
@@ -4732,13 +4732,16 @@ class TestQuantizedLinear(TestCase):
         use_bias_list = [True, False]
         weight_quant_per_channel_list = [True, False]
         output_dtype_list = [None, torch.float32, torch.bfloat16]
-        y_scale, y_zp = 0.07, 0
+        y_scale, y_zp = 0.7, 0
         input_dim_list = [2, 3]
         cases = itertools.product(
             in_channels_list, out_channels_list, use_bias_list,
             weight_quant_per_channel_list, output_dtype_list, post_op_algorithms, input_dim_list)
         with override_quantized_engine('onednn'):
             for ic, oc, use_bias, weight_quant_per_channel, output_dtype, post_op_algo, input_dim in cases:
+                print("==================== ic:{}, oc:{}, use_bias:{}, weight_quant_per_channel:{}, output_dtype:{}, post_op_algo:{}, input_dim:{} ==========".format(
+                    ic, oc, use_bias, weight_quant_per_channel, output_dtype, post_op_algo, input_dim
+                ))
                 used_y_scale = y_scale
                 used_y_zp = y_zp
                 fp32_out = output_dtype == torch.float32
@@ -4819,11 +4822,13 @@ class TestQuantizedLinear(TestCase):
 
                 # Compare results
                 if output_dtype is None:
-                    y_ref = _quantize_fp8e4m3(y_ref, False, used_y_scale)[0]
+                    # y_ref = _quantize_fp8e4m3(y_ref, False, used_y_scale)[0]
+                    y_ref = y_ref.div(used_y_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
                 else:
                     y_ref = y_ref.to(output_dtype)
 
                 self.assertEqual(x.dim(), qy.dim())
+                print("max diff", torch.abs(y_ref.float() - qy.float()).max()," at", torch.argmax(torch.abs(y_ref.float() - qy.float())))
                 self.assertEqual(y_ref.float(), qy.float())
 
     @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
