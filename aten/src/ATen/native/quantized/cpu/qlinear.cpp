@@ -1160,8 +1160,9 @@ static at::Tensor linear_int8_with_onednn_weight(
     real_other = real_other.to(at::kFloat) * other_scale;
   }
   auto out_dtype = output_dtype.has_value() ? output_dtype.value()
-      : (is_fp8 ? c10::kFloat : input.scalar_type());
-  auto fp8_out_scale = output_dtype.has_value() ? 1.0f : output_scale;
+      : (is_fp8 ? c10::kFloat8_e4m3fn : input.scalar_type());
+  if (out_dtype == c10::kFloat8_e4m3fn) out_dtype = c10::kFloat; // we do the re-quantization ourselves
+  auto fp8_out_scale = output_scale;
   output_scale = 1.0f;
   at::Tensor output = binary_post_op == "sum" ?
       real_other :
@@ -1258,7 +1259,7 @@ static at::Tensor linear_int8_with_onednn_weight(
     args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, src1});
   }
   primitive.execute(ideep::stream::default_stream(), args);
-  if (is_fp8 && !output_dtype.has_value()) {
+  if (is_fp8 && (!output_dtype.has_value() || output_dtype.value() == c10::kFloat8_e4m3fn)) {
     output = output.div(fp8_out_scale).clamp(-448, 448).to(c10::kFloat8_e4m3fn);
     if (binary_post_op == "sum") {
       // If the output is fp8, we need to copy the result back to the original tensor
