@@ -1035,6 +1035,9 @@ static at::Tensor fp8_qlinear_onednn_ref(
   y_f32.div_(output_scale);
   y_f32 = y_f32.view(output_size);
   auto out_dtype = output_dtype.has_value() ? output_dtype.value() : at::kFloat8_e4m3fn;
+  if (out_dtype == at::kFloat8_e4m3fn) {
+    y_f32.clamp_(-448, 448);
+  }
   return y_f32.to(out_dtype);
 }
 
@@ -1115,7 +1118,7 @@ static at::Tensor linear_int8_with_onednn_weight(
 #if defined(__powerpc__)
   if (is_fp8) {
 #else
-  if(is_fp8 && !cpuinfo_has_x86_amx_int8()) {
+  if(is_fp8 && !cpuinfo_has_x86_amx_fp16()) {
 #endif
     // Fall back to ref impl on old platforms because not supported
     // Transpose weight to align with behavior in oneDNN
@@ -1152,12 +1155,21 @@ static at::Tensor linear_int8_with_onednn_weight(
   }
   std::vector<int64_t> src_dims = {M, K};
   std::vector<int64_t> dst_dims = {M, N};
+  auto real_other = other.has_value() ? other.value() : at::Tensor();
+  if (is_fp8 && binary_post_op != "none" && !output_dtype.has_value()) {
+    real_other = real_other.to(at::kFloat) * other_scale;
+  }
+  auto out_dtype = output_dtype.has_value() ? output_dtype.value()
+      : (is_fp8 ? c10::kFloat8_e4m3fn : input.scalar_type());
+  if (out_dtype == c10::kFloat8_e4m3fn) out_dtype = c10::kFloat; // we do the re-quantization ourselves
+  auto fp8_out_scale = output_scale;
+  output_scale = 1.0f;
   at::Tensor output = binary_post_op == "sum" ?
-      other.value() :
+      real_other :
       at::empty(
         dst_dims,
         at::device(c10::kCPU)
-            .dtype(fp32_output ? c10::kFloat : (bf16_output ? c10::kBFloat16 : input.scalar_type()))
+            .dtype(out_dtype)
       );
   if (output.numel() == 0) {
     return output;
@@ -1166,7 +1178,7 @@ static at::Tensor linear_int8_with_onednn_weight(
   static tensor empty_tensor;
   static tensor::desc empty_tensor_desc;
   tensor src1 = binary_post_op == "add" ?
-      at::native::itensor_view_from_dense(other.value().reshape({-1, other.value().size(dim - 1)})) :
+      at::native::itensor_view_from_dense(real_other.reshape({-1, real_other.size(dim - 1)})) :
       empty_tensor;
 
   // Create onednn primitive
@@ -1247,6 +1259,14 @@ static at::Tensor linear_int8_with_onednn_weight(
     args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, src1});
   }
   primitive.execute(ideep::stream::default_stream(), args);
+  if (is_fp8 && (!output_dtype.has_value() || output_dtype.value() == c10::kFloat8_e4m3fn)) {
+    output = output.div(fp8_out_scale).clamp(-448, 448).to(c10::kFloat8_e4m3fn);
+    if (binary_post_op == "sum") {
+      // If the output is fp8, we need to copy the result back to the original tensor
+      other.value().copy_(output.view(other.value().sizes()));
+      return other.value();
+    }
+  }
   return dim == 2 ? output : output.reshape(output_size);
 }
 
