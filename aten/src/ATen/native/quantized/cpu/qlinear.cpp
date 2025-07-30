@@ -941,7 +941,7 @@ static at::Tensor fp8_qlinear_onednn_ref(
     double binary_alpha,
     const std::string_view& unary_post_op, // e.g. "none", "relu"
     torch::List<std::optional<at::Scalar>>& unary_post_op_args,
-    std::string_view& unary_post_op_algorithm) {
+    const std::string_view& unary_post_op_algorithm) {
   TORCH_CHECK(
     input.scalar_type() == at::ScalarType::Float8_e4m3fn && weight.scalar_type() == at::ScalarType::Float8_e4m3fn,
     "FP8 qlinear: Unexpected dtype of input and weight:", input.scalar_type(), ", ", weight.scalar_type());
@@ -1056,7 +1056,7 @@ static at::Tensor linear_int8_with_onednn_weight(
     double binary_alpha,
     const std::string_view& unary_post_op, // e.g. "none", "relu"
     torch::List<std::optional<at::Scalar>>& unary_post_op_args,
-    std::string_view& unary_post_op_algorithm) {
+    const std::string_view& unary_post_op_algorithm) {
   using ideep::tensor;
   const int64_t dim = input.dim();
   TORCH_CHECK(input.scalar_type() == c10::ScalarType::Byte || input.scalar_type() == c10::ScalarType::Char || input.scalar_type() == c10::ScalarType::Float8_e4m3fn,
@@ -1152,12 +1152,12 @@ static at::Tensor linear_int8_with_onednn_weight(
   }
   std::vector<int64_t> src_dims = {M, K};
   std::vector<int64_t> dst_dims = {M, N};
+  auto out_dtype = fp32_output ? c10::kFloat : (bf16_output ? c10::kBFloat16 : input.scalar_type());
   at::Tensor output = binary_post_op == "sum" ?
       other.value() :
       at::empty(
         dst_dims,
-        at::device(c10::kCPU)
-            .dtype(fp32_output ? c10::kFloat : (bf16_output ? c10::kBFloat16 : input.scalar_type()))
+        at::device(c10::kCPU).dtype(out_dtype)
       );
   if (output.numel() == 0) {
     return output;
@@ -1169,6 +1169,55 @@ static at::Tensor linear_int8_with_onednn_weight(
       at::native::itensor_view_from_dense(other.value().reshape({-1, other.value().size(dim - 1)})) :
       empty_tensor;
 
+  // Prepare args
+  ideep::exec_args args;
+  args.insert({DNNL_ARG_SRC, src});
+  args.insert({DNNL_ARG_DST, dst});
+  if (with_bias) {
+    args.insert({DNNL_ARG_BIAS, onednn_bias.value()});
+  }
+  tensor src_scales_t = tensor(ideep::scale_t(1, input_scale));
+  tensor wei_scales_t = at::native::itensor_from_tensor(weight_scales);
+  tensor dst_scales_t = tensor(ideep::scale_t(1, output_scale));
+  tensor src_zp_t = tensor(ideep::zero_point_t(1, input_zero_point));
+  tensor dst_zp_t = tensor(ideep::zero_point_t(1, output_zero_point));
+  if (input_scale != 1.0f) {
+    args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scales_t});
+  }
+  if (output_scale != 1.0f) {
+    args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scales_t});
+  }
+  args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_t});
+  if (input_zero_point != 0) {
+    args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_t});
+  }
+  if (output_zero_point != 0) {
+    args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_t});
+  }
+  if (binary_post_op == "add") {
+    args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, src1});
+  }
+
+  // find primitive and primitive desc in cache
+  static LRUCache context_cache(1024);
+  std::string cache_key = onednn_utils::make_qlinear_context_cache_key(
+    input_contig, input_zero_point, onednn_weight, weight_scales, bias,
+    output_zero_point, out_dtype, other_scale, other_zero_point, binary_post_op,
+    binary_alpha, unary_post_op, unary_post_op_args, unary_post_op_algorithm,
+    at::get_num_threads());
+  auto cache_it = context_cache.find(cache_key);
+  if (cache_it != context_cache.end()) {
+    auto& primitive = cache_it->second.primitive;
+    auto& pd = cache_it->second.pd;
+    auto& scratchpad = cache_it->second.scratchpad;
+    // Reorder weight if needed
+    auto expected_weight = packed_weight.reorder_if_differ_in(pd.weights_desc());
+    args.insert({DNNL_ARG_WEIGHTS, expected_weight});
+    args.insert({DNNL_ARG_SCRATCHPAD, scratchpad});
+    primitive.execute(ideep::stream::default_stream(), args);
+    return dim == 2 ? output : output.reshape(output_size);
+  }
+  // If not found in cache, create a new primitive and primitive desc
   // Create onednn primitive
   auto src_dtype = at::native::get_mkldnn_dtype(input.scalar_type());
   auto src_desc = tensor::desc(src_dims, src_dtype, ideep::format_tag::any);
@@ -1211,40 +1260,19 @@ static at::Tensor linear_int8_with_onednn_weight(
       dnnl::matmul::primitive_desc(engine, src_desc, weights_desc, bias_desc, dst_desc, op_attr) :
       dnnl::matmul::primitive_desc(engine, src_desc, weights_desc, dst_desc, op_attr);
   auto primitive = dnnl::matmul(primitive_desc);
+  // Put in cache
+  context_cache.insert(std::pair<std::string, QLinearContext>(
+      cache_key, QLinearContext(primitive, primitive_desc)));
 
   // Reorder weight if needed
   auto expected_weight = packed_weight.reorder_if_differ_in(primitive_desc.weights_desc());
 
-  // Prepare args and execute primitive
+  // execute primitive
   tensor scratchpad(primitive_desc.scratchpad_desc());
-  ideep::exec_args args;
-  args.insert({DNNL_ARG_SRC, src});
   args.insert({DNNL_ARG_WEIGHTS, expected_weight});
-  args.insert({DNNL_ARG_DST, dst});
   args.insert({DNNL_ARG_SCRATCHPAD, scratchpad});
   if (with_bias) {
     args.insert({DNNL_ARG_BIAS, onednn_bias.value()});
-  }
-  tensor src_scales_t = tensor(ideep::scale_t(1, input_scale));
-  tensor wei_scales_t = at::native::itensor_from_tensor(weight_scales);
-  tensor dst_scales_t = tensor(ideep::scale_t(1, output_scale));
-  tensor src_zp_t = tensor(ideep::zero_point_t(1, input_zero_point));
-  tensor dst_zp_t = tensor(ideep::zero_point_t(1, output_zero_point));
-  if (input_scale != 1.0f) {
-    args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scales_t});
-  }
-  if (output_scale != 1.0f) {
-    args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scales_t});
-  }
-  args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_t});
-  if (input_zero_point != 0) {
-    args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_t});
-  }
-  if (output_zero_point != 0) {
-    args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_t});
-  }
-  if (binary_post_op == "add") {
-    args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, src1});
   }
   primitive.execute(ideep::stream::default_stream(), args);
   return dim == 2 ? output : output.reshape(output_size);

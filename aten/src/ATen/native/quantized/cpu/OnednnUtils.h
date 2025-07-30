@@ -5,6 +5,7 @@
 #include <ATen/Tensor.h>
 #include <ATen/native/quantized/PackedParams.h>
 #include <ideep.hpp>
+#include <ATen/native/mkldnn/xpu/detail/LRUCache.h>
 #if !defined(__powerpc__)
 #include <cpuinfo.h>
 #endif
@@ -108,6 +109,28 @@ struct DeconvPrimitiveCache : PrimitiveCache {
     return params;
   }
 };
+
+struct QLinearContext {
+  QLinearContext() = default;
+
+  QLinearContext(
+      const dnnl::matmul& primitive,
+      const dnnl::matmul::primitive_desc& pd) {
+    this->primitive = primitive;
+    this->pd = pd;
+    this->scratchpad = ideep::tensor(pd.scratchpad_desc());
+  }
+
+  dnnl::matmul primitive;
+  dnnl::matmul::primitive_desc pd;
+  ideep::tensor scratchpad;
+};
+
+
+using LRUCache = at::native::onednn::lru_cache<
+    std::string,
+    QLinearContext,
+    std::unordered_map>;
 
 enum PostOps {
   NoPostOp,
@@ -445,6 +468,44 @@ inline bool should_use_onednn_quant(
       std::all_of(output_padding.begin(), output_padding.end(), [](int i) { return i==0; });
   return vnni_available && (groups <= 100) && w_sym_quant && opad_all_zero;
 #endif
+}
+
+static std::string make_qlinear_context_cache_key(
+    const at::Tensor& input_contig,
+    int64_t input_zero_point,
+    const at::Tensor& onednn_weight,
+    const at::Tensor& weight_scales,
+    const std::optional<at::Tensor>& bias,
+    int64_t output_zero_point,
+    c10::ScalarType out_dtype,
+    double other_scale,
+    int64_t other_zero_point,
+    const std::string_view& binary_post_op,
+    double binary_alpha,
+    const std::string_view& unary_post_op,
+    const torch::List<std::optional<at::Scalar>>& unary_post_op_args,
+    const std::string_view& unary_post_op_algorithm,
+    int omp_num_threads) {
+  std::vector<float> unary_post_op_args_vec =
+      unary_post_op_args.vec().empty() ? std::vector<float>() :
+      std::vector<float>(unary_post_op_args.size());
+  for (const auto i : c10::irange(unary_post_op_args.size())) {
+    if (unary_post_op_args.get(i).has_value()) {
+      unary_post_op_args_vec[i] = unary_post_op_args.get(i).value().to<float>();
+    } else {
+      unary_post_op_args_vec[i] = 0.0f; // default value
+    }
+  }
+  std::ostringstream oss;
+  oss << input_contig.scalar_type() << "," << onednn_weight.scalar_type() << ","
+      << out_dtype << "," << input_contig.sizes() << "," << (input_zero_point != 0) << ","
+      << onednn_weight.sizes() << "," << (weight_scales.numel() > 1) << ","
+      << (bias.has_value()) << "," << (output_zero_point != 0) << ","
+      << other_scale << "," << other_zero_point << ","
+      << binary_post_op << "," << binary_alpha << ","
+      << unary_post_op << "," << unary_post_op_args_vec << ","
+      << unary_post_op_algorithm << "," << omp_num_threads;
+  return oss.str();
 }
 
 } // onednn_utils
