@@ -470,12 +470,14 @@ inline bool should_use_onednn_quant(
 #endif
 }
 
-static std::string make_qlinear_context_cache_key(
+inline std::string make_qlinear_context_cache_key(
     const at::Tensor& input_contig,
+    double input_scale,
     int64_t input_zero_point,
     const at::Tensor& onednn_weight,
     const at::Tensor& weight_scales,
     const std::optional<at::Tensor>& bias,
+    double output_scale,
     int64_t output_zero_point,
     c10::ScalarType out_dtype,
     double other_scale,
@@ -486,25 +488,33 @@ static std::string make_qlinear_context_cache_key(
     const torch::List<std::optional<at::Scalar>>& unary_post_op_args,
     const std::string_view& unary_post_op_algorithm,
     int omp_num_threads) {
-  std::vector<float> unary_post_op_args_vec =
-      unary_post_op_args.vec().empty() ? std::vector<float>() :
-      std::vector<float>(unary_post_op_args.size());
-  for (const auto i : c10::irange(unary_post_op_args.size())) {
-    if (unary_post_op_args.get(i).has_value()) {
-      unary_post_op_args_vec[i] = unary_post_op_args.get(i).value().to<float>();
-    } else {
-      unary_post_op_args_vec[i] = 0.0f; // default value
-    }
-  }
+  at::ScalarType bias_dtype = bias.has_value() ?
+      bias.value().scalar_type() : at::ScalarType::Undefined;
   std::ostringstream oss;
-  oss << input_contig.scalar_type() << "," << onednn_weight.scalar_type() << ","
-      << out_dtype << "," << input_contig.sizes() << "," << (input_zero_point != 0) << ","
-      << onednn_weight.sizes() << "," << (weight_scales.numel() > 1) << ","
-      << (bias.has_value()) << "," << (output_zero_point != 0) << ","
-      << other_scale << "," << other_zero_point << ","
-      << binary_post_op << "," << binary_alpha << ","
-      << unary_post_op << "," << unary_post_op_args_vec << ","
-      << unary_post_op_algorithm << "," << omp_num_threads;
+  oss << (int)input_contig.scalar_type() << ',' << (int)onednn_weight.scalar_type() << ','
+      << (int)out_dtype << ','
+      << input_contig.sizes() << ',' << (input_scale != 1.0) << (input_zero_point != 0) << ','
+      << onednn_weight.sizes() << ',' << (weight_scales.numel() > 1) << ','
+      << (bias.has_value()) << ',' << (int)bias_dtype << ','
+      << (output_scale != 1.0f) << ',' << (output_zero_point != 0) << ',' << omp_num_threads;
+  if (binary_post_op != "none") {
+      oss << ',' << other_scale << ',' << other_zero_point << ','
+          << binary_post_op << ',' << binary_alpha;
+  }
+  if (unary_post_op != "none") {
+      std::vector<float> unary_post_op_args_vec =
+          unary_post_op_args.empty() ? std::vector<float>() :
+          std::vector<float>(unary_post_op_args.size());
+      for (const auto i : c10::irange(unary_post_op_args.size())) {
+        if (unary_post_op_args.get(i).has_value()) {
+          unary_post_op_args_vec[i] = unary_post_op_args.get(i).value().to<float>();
+        } else {
+          unary_post_op_args_vec[i] = 0.0f; // default value
+        }
+      }
+      oss << unary_post_op << ',' << unary_post_op_args_vec << ','
+          << unary_post_op_algorithm;
+  }
   return oss.str();
 }
 

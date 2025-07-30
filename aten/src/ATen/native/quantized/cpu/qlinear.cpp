@@ -1131,28 +1131,27 @@ static at::Tensor linear_int8_with_onednn_weight(
   auto input_contig =
       dim == 2 ? input.contiguous() : input.reshape({-1, input.size(dim - 1)}).contiguous();
 
-  auto src = at::native::itensor_from_tensor(input_contig);
+  auto src = at::native::itensor_from_tensor(input_contig, true);
   auto packed_weight = at::native::itensor_from_mkldnn(onednn_weight);
   int64_t K = input.size(dim - 1), M = input.numel() / K, N = packed_weight.get_dim(1);
 
   auto output_size = input.sizes().vec();
   output_size[dim - 1] = N;
 
-  std::optional<ideep::tensor> onednn_bias{std::nullopt};
+  static tensor empty_tensor;
+  static tensor::desc empty_tensor_desc;
+
   bool with_bias = bias.has_value();
-  at::Tensor bias_val_float;
-  if (with_bias) {
-    bias_val_float = bias.value().to(at::kFloat);
-    if (bias_val_float.dim() == 1) {
-      auto b_reshape = bias_val_float.reshape({1, bias_val_float.size(0)});
-      onednn_bias = at::native::itensor_view_from_dense(b_reshape);
-    } else {
-      onednn_bias = at::native::itensor_view_from_dense(bias_val_float);
-    }
-  }
-  std::vector<int64_t> src_dims = {M, K};
-  std::vector<int64_t> dst_dims = {M, N};
+  tensor onednn_bias = with_bias ? at::native::itensor_from_tensor(
+      bias.value().dim() == 1 ? bias.value().unsqueeze(0) : bias.value(),
+      true
+    ) : empty_tensor;
+  tensor src1 = binary_post_op == "add" ?
+      at::native::itensor_view_from_dense(other.value().reshape({-1, other.value().size(dim - 1)}), true) :
+      empty_tensor;
+
   auto out_dtype = fp32_output ? c10::kFloat : (bf16_output ? c10::kBFloat16 : input.scalar_type());
+  std::vector<int64_t> dst_dims = {M, N};
   at::Tensor output = binary_post_op == "sum" ?
       other.value() :
       at::empty(
@@ -1162,36 +1161,37 @@ static at::Tensor linear_int8_with_onednn_weight(
   if (output.numel() == 0) {
     return output;
   }
-  tensor dst = at::native::itensor_view_from_dense(output);
-  static tensor empty_tensor;
-  static tensor::desc empty_tensor_desc;
-  tensor src1 = binary_post_op == "add" ?
-      at::native::itensor_view_from_dense(other.value().reshape({-1, other.value().size(dim - 1)})) :
-      empty_tensor;
+  tensor dst = at::native::itensor_view_from_dense(output, true);
 
   // Prepare args
   ideep::exec_args args;
   args.insert({DNNL_ARG_SRC, src});
   args.insert({DNNL_ARG_DST, dst});
   if (with_bias) {
-    args.insert({DNNL_ARG_BIAS, onednn_bias.value()});
+    args.insert({DNNL_ARG_BIAS, onednn_bias});
   }
-  tensor src_scales_t = tensor(ideep::scale_t(1, input_scale));
-  tensor wei_scales_t = at::native::itensor_from_tensor(weight_scales);
-  tensor dst_scales_t = tensor(ideep::scale_t(1, output_scale));
-  tensor src_zp_t = tensor(ideep::zero_point_t(1, input_zero_point));
-  tensor dst_zp_t = tensor(ideep::zero_point_t(1, output_zero_point));
-  if (input_scale != 1.0f) {
+
+  tensor wei_scales_t = at::native::itensor_from_tensor(weight_scales, true);
+  // Create tensors as static to avoid re-creating them for each call
+  static tensor src_scales_t = tensor(ideep::scale_t(1, 1.0));
+  static tensor dst_scales_t = tensor(ideep::scale_t(1, 1.0));
+  static tensor src_zp_t = tensor(ideep::zero_point_t(1, 0));
+  static tensor dst_zp_t = tensor(ideep::zero_point_t(1, 0));
+  ((float*)src_scales_t.get_data_handle())[0] = input_scale;
+  ((float*)dst_scales_t.get_data_handle())[0] = output_scale;
+  ((int*)src_zp_t.get_data_handle())[0] = input_zero_point;
+  ((int*)dst_zp_t.get_data_handle())[0] = output_zero_point;
+  if (C10_LIKELY(input_scale != 1.0f)) {
     args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scales_t});
   }
-  if (output_scale != 1.0f) {
+  if (C10_LIKELY(output_scale != 1.0f)) {
     args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scales_t});
   }
   args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_t});
-  if (input_zero_point != 0) {
+  if (C10_LIKELY(input_zero_point != 0)) {
     args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_t});
   }
-  if (output_zero_point != 0) {
+  if (C10_LIKELY(output_zero_point != 0)) {
     args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_t});
   }
   if (binary_post_op == "add") {
@@ -1201,9 +1201,9 @@ static at::Tensor linear_int8_with_onednn_weight(
   // find primitive and primitive desc in cache
   static LRUCache context_cache(1024);
   std::string cache_key = onednn_utils::make_qlinear_context_cache_key(
-    input_contig, input_zero_point, onednn_weight, weight_scales, bias,
-    output_zero_point, out_dtype, other_scale, other_zero_point, binary_post_op,
-    binary_alpha, unary_post_op, unary_post_op_args, unary_post_op_algorithm,
+    input_contig, input_scale, input_zero_point, onednn_weight, weight_scales, bias,
+    output_scale, output_zero_point, out_dtype, other_scale, other_zero_point,
+    binary_post_op, binary_alpha, unary_post_op, unary_post_op_args, unary_post_op_algorithm,
     at::get_num_threads());
   auto cache_it = context_cache.find(cache_key);
   if (cache_it != context_cache.end()) {
@@ -1219,13 +1219,14 @@ static at::Tensor linear_int8_with_onednn_weight(
   }
   // If not found in cache, create a new primitive and primitive desc
   // Create onednn primitive
+  std::vector<int64_t> src_dims = {M, K};
   auto src_dtype = at::native::get_mkldnn_dtype(input.scalar_type());
   auto src_desc = tensor::desc(src_dims, src_dtype, ideep::format_tag::any);
   auto weights_desc = packed_weight.get_desc();
   auto dst_dtype = dst.get_data_type();
   auto dst_desc = tensor::desc(dst_dims, dst_dtype, ideep::format_tag::any);
   auto bias_desc = with_bias ?
-      tensor::desc(onednn_bias.value().get_dims(), ideep::data_type::f32, ideep::format_tag::any) :
+      tensor::desc(onednn_bias.get_dims(), onednn_bias.get_data_type(), ideep::format_tag::any) :
       empty_tensor_desc;
   // Get op attr for primitive
   // Note: output_scale & output_zero_point are for re-quantization of the final output.
@@ -1271,9 +1272,6 @@ static at::Tensor linear_int8_with_onednn_weight(
   tensor scratchpad(primitive_desc.scratchpad_desc());
   args.insert({DNNL_ARG_WEIGHTS, expected_weight});
   args.insert({DNNL_ARG_SCRATCHPAD, scratchpad});
-  if (with_bias) {
-    args.insert({DNNL_ARG_BIAS, onednn_bias.value()});
-  }
   primitive.execute(ideep::stream::default_stream(), args);
   return dim == 2 ? output : output.reshape(output_size);
 }
