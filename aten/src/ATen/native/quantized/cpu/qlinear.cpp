@@ -1161,9 +1161,11 @@ static at::Tensor linear_int8_with_onednn_weight(
   }
   auto out_dtype = output_dtype.has_value() ? output_dtype.value()
       : (is_fp8 ? c10::kFloat8_e4m3fn : input.scalar_type());
-  if (out_dtype == c10::kFloat8_e4m3fn) out_dtype = c10::kFloat; // we do the re-quantization ourselves
   auto fp8_out_scale = output_scale;
-  output_scale = 1.0f;
+  if (out_dtype == c10::kFloat8_e4m3fn) {
+    out_dtype = c10::kFloat; // we do the re-quantization ourselves
+    output_scale = 1.0f;
+  }
   at::Tensor output = binary_post_op == "sum" ?
       real_other :
       at::empty(
