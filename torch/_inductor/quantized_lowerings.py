@@ -73,12 +73,15 @@ def register_woq_mm_ops() -> None:
             if use_aten_gemm_kernels()
             else []
         )
+        scale_fp32 = V.graph.add_tensor_constant(
+            V.graph.constants[scale.get_name()].float(), name=None
+        )
 
         # scale is applied as an epilogue, and the scale tensor is expanded (with a view op)
         # for broadcasting, as it's 1D.
         def _mul_epilogue(buf: torch.Tensor) -> Any:
             return create_epilogue_with_attr(
-                buf, "mul", other=realize_inputs(expand(scale, layout.size))
+                buf, "mul", other=realize_inputs(expand(scale_fp32, layout.size))
             )
 
         if use_cpp_gemm_template(aten_layout, mat1, mat2, mat2_transposed=True):

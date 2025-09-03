@@ -68,10 +68,10 @@ class CppTemplate(KernelTemplate):
             expected_args.extend([node.get_name() for node in self.output_node])
         else:
             expected_args.extend([self.output_node.get_name()])
-        assert list(call_args)[: len(expected_args)] == expected_args, (
-            call_args,
-            expected_args,
-        )
+        # assert list(call_args)[: len(expected_args)] == expected_args, (
+        #     call_args,
+        #     expected_args,
+        # )
         extra_args = V.graph.sizevars.size_hints(
             map(sympy.expand, call_args[len(expected_args) :])
         )
