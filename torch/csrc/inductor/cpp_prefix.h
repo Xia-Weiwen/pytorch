@@ -1321,3 +1321,39 @@ class AMXState {
     tile_release();
   }
 };
+
+// Different versions of fp32->fp8 conversion
+#if defined(CPU_CAPABILITY_AVX512) && !defined(_MSC_VER)
+#if defined(__AVX10_2__)
+
+static inline __m128i cvtfp32_fp8e4m3(const __m512& src) {
+  std::cout << "\n==========> F32->F8 with _mm256_cvtph_hf8" << std::endl;
+  __m256i f16_vec =
+      _mm512_cvt_roundps_ph(src, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  return _mm256_cvtph_hf8(_mm256_castsi256_ph(f16_vec));
+}
+
+static inline at::vec::VectorizedN<at::Float8_e4m3fn, 1>
+convert_float32_float8_e4m3fn(const at::vec::VectorizedN<float, 1>& src_n) {
+  at::vec::Vectorized<float> src = src_n[0];
+  __m128i res128 = cvtfp32_fp8e4m3(src);
+  return at::vec::Vectorized<at::Float8_e4m3fn>(_mm512_castsi128_si512(res128));
+}
+
+#else // no __AVX10_2__
+
+static inline at::vec::VectorizedN<at::Float8_e4m3fn, 1>
+convert_float32_float8_e4m3fn(const at::vec::VectorizedN<float, 1>& src_n) {
+  std::cout << "\n==========> F32->F8 with fallback" << std::endl;
+  return at::vec::convert<at::Float8_e4m3fn, 1, float, 1>(src_n);
+}
+
+#endif // __AVX10_2__
+#else // defined(CPU_CAPABILITY_AVX512) && !defined(_MSC_VER)
+static inline at::vec::VectorizedN<at::Float8_e4m3fn, 1>
+convert_float32_float8_e4m3fn(const at::vec::VectorizedN<float, 1>& src_n) {
+  TORCH_CHECK(
+      false,
+      "convert_float32_float8_e4m3fn: Unsupported CPU architecture or OS (require >= AVX512 & Linux)");
+}
+#endif // defined(CPU_CAPABILITY_AVX512) && !defined(_MSC_VER)

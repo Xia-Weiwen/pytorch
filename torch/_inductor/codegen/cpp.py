@@ -3502,7 +3502,10 @@ class CppVecKernel(CppKernel):
             expr = f"{src}.to<{dst_cpp_type},{dst_num_vectors}>()"
         elif src_dtype != dtype:
             if src_num_vectors == dst_num_vectors == 1:
-                expr = f"at::vec::convert<{dst_cpp_type}>({src})"
+                if src_dtype == torch.float and dtype == torch.float8_e4m3fn:
+                    expr = f"convert_float32_float8_e4m3fn({src})"  # defined in cpp_prefix.h with AVX10.2
+                else:
+                    expr = f"at::vec::convert<{dst_cpp_type}>({src})"
             else:
                 expr = f"at::vec::convert<{dst_cpp_type},{dst_num_vectors},{src_cpp_type},{src_num_vectors}>({src})"
         return expr
